@@ -879,6 +879,12 @@ def parse_args():
         default=1000,
         help="Top-k for PSI sampling",
     )
+    parser.add_argument(
+        "--psi_time_gap_sec",
+        type=float,
+        default=0.5,
+        help="Time gap in seconds between the 2 frames used for PSI control extraction",
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -1070,6 +1076,7 @@ def main():
                 'temporal_compression': vae.config.temporal_compression_ratio,
                 'spatial_compression': vae.config.spatial_compression_ratio,
                 'device': accelerator.device,
+                'time_gap_sec': args.psi_time_gap_sec,
                 'mask_ratio': args.psi_mask_ratio,
                 'temperature': args.psi_temperature,
                 'top_p': args.psi_top_p,

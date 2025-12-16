@@ -35,6 +35,8 @@ class PSIControlFeatureExtractor(nn.Module):
     This wrapper integrates PSIPredictor into the VideoX-Fun training pipeline,
     extracting control features from video frames during training.
     
+    Extracts control from 2 frames spaced 0.5 seconds apart.
+    
     Input: control_pixel_values (B, F, C, H, W) - normalized to [-1, 1]
     Output: control_embeddings (B, C_out, F, H_latent, W_latent)
     """
@@ -55,6 +57,7 @@ class PSIControlFeatureExtractor(nn.Module):
         top_p: float = 0.9,
         top_k: int = 1000,
         seed: int = 42,
+        time_gap_sec: float = 0.5,  # Time gap between the 2 frames (in seconds)
         **kwargs
     ):
         super().__init__()
@@ -75,6 +78,7 @@ class PSIControlFeatureExtractor(nn.Module):
         self.top_p = top_p
         self.top_k = top_k
         self.seed = seed
+        self.time_gap_sec = time_gap_sec
         
         # Initialize PSIPredictor
         print(f"Initializing PSIPredictor...")
@@ -92,12 +96,10 @@ class PSIControlFeatureExtractor(nn.Module):
             device=device
         )
         
-        # Freeze PSI predictor - always use in inference mode
-        self.predictor.eval()
-        for param in self.predictor.parameters():
-            param.requires_grad = False
+        # Set PSI predictor to eval mode
+        self.predictor.model.eval()
         
-        print("✓ PSIPredictor loaded successfully (frozen mode)")
+        print("✓ PSIPredictor loaded successfully (inference mode)")
         
         # Projection layer to adapt PSI output to expected latent dimensions
         # PSI outputs may have different channel dimensions than VAE latents
@@ -138,9 +140,11 @@ class PSIControlFeatureExtractor(nn.Module):
         
         return unmask_indices_list
     
-    def forward(self, control_pixel_values):
+    def forward(self, control_pixel_values, fps=None):
         """
         Extract control features from input video frames using PSIPredictor.
+        
+        Extracts features from only 2 frames spaced time_gap_sec (default 0.5s) apart.
         
         Args:
             control_pixel_values: (B, F, C, H, W) tensor, values in [-1, 1]
@@ -148,6 +152,7 @@ class PSIControlFeatureExtractor(nn.Module):
                                  F = number of frames
                                  C = 3 (RGB channels)
                                  H, W = height and width
+            fps: Frames per second of the video (optional, defaults to estimating from num_frames)
         
         Returns:
             control_embeddings: (B, C_out, F, H_latent, W_latent) tensor
@@ -174,27 +179,49 @@ class PSIControlFeatureExtractor(nn.Module):
             # Get frames for this sample: (F, C, H, W)
             sample_frames = rgb_frames_01[b]
             
-            # Convert to list of numpy arrays (H, W, C) as expected by PSI
+            # ==================================================================
+            # Sample 2 frames that are time_gap_sec apart
+            # ==================================================================
+            # Estimate FPS if not provided (assume video is ~2-3 seconds)
+            if fps is None:
+                estimated_duration = 2.0  # seconds
+                fps = num_frames / estimated_duration
+            
+            # Calculate frame indices for 2 frames with time_gap_sec apart
+            frames_per_gap = int(fps * self.time_gap_sec)
+            
+            # Always sample: frame 0 and frame at +time_gap_sec
+            frame_idx_0 = 0
+            frame_idx_1 = min(frames_per_gap, num_frames - 1)
+            
+            # Handle edge case: if video is too short, use first and last frame
+            if frame_idx_1 == frame_idx_0:
+                frame_idx_1 = num_frames - 1
+            
+            sampled_indices = [frame_idx_0, frame_idx_1]
+            
+            print(f"[PSI] Extracting control from 2 frames: {sampled_indices} "
+                  f"(out of {num_frames} total, time gap: {self.time_gap_sec}s, fps: {fps:.1f})")
+            
+            # Convert ONLY the 2 sampled frames to numpy arrays
             rgb_frames = []
-            for f in range(num_frames):
-                frame = sample_frames[f].permute(1, 2, 0)  # (H, W, C)
+            for idx in sampled_indices:
+                frame = sample_frames[idx].permute(1, 2, 0)  # (H, W, C)
                 frame_np = frame.cpu().numpy()
                 rgb_frames.append(frame_np)
             
-            # Create masks for each frame
+            # Create masks for the 2 frames
             unmask_indices_rgb = self.create_mask_indices(
                 self.mask_ratio, 
-                num_frames, 
+                2,  # Only 2 frames
                 seed=self.seed + b
             )
             
-            # Generate prompt for PSI
-            # Example: "rgb0,rgb1->rgb1" means use rgb0 and rgb1 to predict rgb1
-            frame_ids = ",".join([f"rgb{i}" for i in range(num_frames)])
-            prompt = f"{frame_ids}->rgb{num_frames-1}"
+            # Generate prompt for PSI: "rgb0,rgb1->rgb1"
+            prompt = "rgb0,rgb1->rgb1"
             
-            # Create time codes (evenly spaced)
-            time_codes = [int(i * 1000 / num_frames) for i in range(num_frames)]
+            # Time codes: 0ms and time_gap_sec*1000 ms
+            time_codes = [0, int(self.time_gap_sec * 1000)]
             
             # Call parallel_extract_features (no gradients needed)
             with torch.no_grad():
@@ -224,12 +251,12 @@ class PSIControlFeatureExtractor(nn.Module):
             # Output structure:
             # - hidden_state_coarse_2d_list: list of (1, 32, 32, 1, 4096) per frame
             # - embeddings_coarse_2d_list: list of (1, 32, 32, 1, 4096) per frame
-            # We use: ALL hidden states + ONLY UNMASKED embeddings
+            # We extracted features from 2 frames only
             
             if not isinstance(outputs, dict):
                 raise ValueError(f"Expected dict output from PSI, got {type(outputs)}")
             
-            # Extract the feature lists
+            # Extract the feature lists (contains features for 2 frames)
             hidden_states_list = outputs.get('hidden_state_coarse_2d_list', None)
             embeddings_list = outputs.get('embeddings_coarse_2d_list', None)
             
@@ -240,33 +267,49 @@ class PSIControlFeatureExtractor(nn.Module):
                     f"Got: {list(outputs.keys())}"
                 )
             
-            # Process each frame's features
-            frame_features = []
-            for frame_idx in range(num_frames):
-                # Get features for this frame (last index = target frame being predicted)
+            if len(hidden_states_list) != 2 or len(embeddings_list) != 2:
+                raise ValueError(
+                    f"Expected 2 frames from PSI output, got {len(hidden_states_list)}"
+                )
+            
+            # Process features from the 2 extracted frames
+            extracted_frame_features = []
+            for psi_frame_idx in range(2):  # Only 2 frames
+                # Get features for this frame
                 # Shape: (1, 32, 32, 1, 4096)
-                hidden_state = hidden_states_list[frame_idx]
-                embeddings = embeddings_list[frame_idx]
+                hidden_state = hidden_states_list[psi_frame_idx]
+                embeddings = embeddings_list[psi_frame_idx]
                 
                 # Remove extra dimensions: (1, 32, 32, 1, 4096) -> (32, 32, 4096)
                 hidden_state = hidden_state.squeeze(0).squeeze(-2)  # (32, 32, 4096)
                 embeddings = embeddings.squeeze(0).squeeze(-2)  # (32, 32, 4096)
                 
-                # Use ALL hidden states and ALL embeddings (no masking)
+                # Use ALL hidden states and ALL embeddings
                 hidden_features = hidden_state  # (32, 32, 4096)
                 embedding_features = embeddings  # (32, 32, 4096)
                 
                 # Combine hidden states and embeddings
-                # Option 1: Concatenate along feature dimension
                 combined = torch.cat([hidden_features, embedding_features], dim=-1)  # (32, 32, 8192)
                 
-                # Option 2: Just use hidden states (uncomment if preferred)
-                # combined = hidden_features  # (32, 32, 4096)
-                
-                # Option 3: Just use embeddings (uncomment if preferred)
-                # combined = embedding_features  # (32, 32, 4096)
-                
-                frame_features.append(combined)
+                extracted_frame_features.append(combined)
+            
+            # Stack the 2 extracted frames: (2, 32, 32, D)
+            extracted_features = torch.stack(extracted_frame_features, dim=0)  # (2, H, W, D)
+            
+            # ==================================================================
+            # Assign features to all frames in the video
+            # ==================================================================
+            # We extracted features from 2 frames, but need features for all num_frames
+            # Strategy: Use F0 features for frame 0, F1 features for all other frames
+            
+            frame_features = []
+            for target_frame_idx in range(num_frames):
+                if target_frame_idx == 0:
+                    # Frame 0: Use features from first extracted frame (F0)
+                    frame_features.append(extracted_features[0])
+                else:
+                    # Frames 1-N: Use features from second extracted frame (F20)
+                    frame_features.append(extracted_features[1])
             
             # Stack frames: (F, 32, 32, D)
             feature_tensor = torch.stack(frame_features, dim=0)

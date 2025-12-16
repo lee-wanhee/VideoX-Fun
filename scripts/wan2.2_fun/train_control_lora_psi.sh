@@ -31,13 +31,14 @@ export PSI_MASK_RATIO=0.0  # 0.0 = fully visible, increase to mask more patches
 export PSI_TEMPERATURE=1.0
 export PSI_TOP_P=0.9
 export PSI_TOP_K=1000
+export PSI_TIME_GAP_SEC=0.5  # Time gap between 2 frames for control extraction (in seconds)
 
 # Output settings
 export OUTPUT_DIR="outputs/psi_control_lora_$(date +%Y%m%d_%H%M%S)"
 
-# LoRA settings
-export RANK=128
-export NETWORK_ALPHA=64
+# LoRA settings (from train_control_lora.sh)
+export RANK=64
+export NETWORK_ALPHA=32
 
 # Training hyperparameters
 # Note: With 2 GPUs, effective batch size = TRAIN_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * NUM_GPUS
@@ -64,14 +65,22 @@ export VALIDATION_PATHS=(
 )
 
 
-# Video settings
+# Video settings (from train_control_lora.sh defaults)
 export VIDEO_SAMPLE_SIZE=512
-export VIDEO_SAMPLE_N_FRAMES=17
-export VIDEO_SAMPLE_STRIDE=4
+export VIDEO_SAMPLE_N_FRAMES=81  # Default is 81, not 17!
+export VIDEO_SAMPLE_STRIDE=2
+export VIDEO_REPEAT=1
+
+# Optimizer settings (from train_control_lora.sh)
+export ADAM_WEIGHT_DECAY=3e-2
+export ADAM_EPSILON=1e-10
+export MAX_GRAD_NORM=0.05
 
 # Other settings
 export CHECKPOINTING_STEPS=500
 export SEED=42
+export VAE_MINI_BATCH=1
+export DATALOADER_NUM_WORKERS=8
 
 # ============================================================================
 # Pre-flight Checks
@@ -169,11 +178,13 @@ accelerate launch \
   --psi_temperature ${PSI_TEMPERATURE} \
   --psi_top_p ${PSI_TOP_P} \
   --psi_top_k ${PSI_TOP_K} \
+  --psi_time_gap_sec ${PSI_TIME_GAP_SEC} \
   \
-  `# LoRA Settings` \
+  `# LoRA Settings (from train_control_lora.sh)` \
   --rank ${RANK} \
   --network_alpha ${NETWORK_ALPHA} \
-  --target_name "attn1,attn2" \
+  --target_name "q,k,v,ffn.0,ffn.2" \
+  --use_peft_lora \
   \
   `# Training Settings` \
   --learning_rate ${LEARNING_RATE} \
@@ -188,21 +199,33 @@ accelerate launch \
   --validation_prompts "${VALIDATION_PROMPTS[@]}" \
   --validation_paths "${VALIDATION_PATHS[@]}" \
   \
-  `# Video Settings` \
+  `# Video Settings (from train_control_lora.sh)` \
   --video_sample_size ${VIDEO_SAMPLE_SIZE} \
   --video_sample_n_frames ${VIDEO_SAMPLE_N_FRAMES} \
   --video_sample_stride ${VIDEO_SAMPLE_STRIDE} \
+  --video_repeat ${VIDEO_REPEAT} \
   --image_sample_size ${VIDEO_SAMPLE_SIZE} \
+  --token_sample_size ${VIDEO_SAMPLE_SIZE} \
   \
-  `# Data Processing` \
+  `# Data Processing (from train_control_lora.sh)` \
   --enable_bucket \
   --random_hw_adapt \
-  --train_mode "control" \
+  --training_with_video_token_length \
+  --uniform_sampling \
+  --train_mode "control_ref" \
+  --control_ref_image "first_frame" \
+  --add_inpaint_info \
+  --add_full_ref_image_in_self_attention \
+  --boundary_type "low" \
   \
-  `# Optimization` \
+  `# Optimization (from train_control_lora.sh)` \
   --mixed_precision bf16 \
   --gradient_checkpointing \
-  --use_8bit_adam \
+  --adam_weight_decay ${ADAM_WEIGHT_DECAY} \
+  --adam_epsilon ${ADAM_EPSILON} \
+  --max_grad_norm ${MAX_GRAD_NORM} \
+  --vae_mini_batch ${VAE_MINI_BATCH} \
+  --low_vram \
   \
   `# Checkpointing` \
   --checkpointing_steps ${CHECKPOINTING_STEPS} \
@@ -210,7 +233,7 @@ accelerate launch \
   \
   `# Other` \
   --seed ${SEED} \
-  --dataloader_num_workers 4 \
+  --dataloader_num_workers ${DATALOADER_NUM_WORKERS} \
   --report_to tensorboard
 
 # ============================================================================
