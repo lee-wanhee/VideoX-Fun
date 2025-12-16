@@ -51,7 +51,9 @@ class PSIControlFeatureExtractor(nn.Module):
         temporal_compression: int = 4,
         spatial_compression: int = 8,
         device: str = "cuda",
-        mask_ratio: float = 0.0,  # How much to mask (0.0 = fully visible)
+        mask_ratio: float = 0.0,  # DEPRECATED: Use mask_ratio_pred instead
+        mask_ratio_cond: float = 0.0,  # Mask ratio for conditioning frame (0.0 = fully visible)
+        mask_ratio_pred: float = 0.9,  # Mask ratio for prediction frame (0.9 = 90% masked)
         prompt_template: str = "rgb0,rgb1->rgb1",  # Prompt for PSI
         temperature: float = 1.0,
         top_p: float = 0.9,
@@ -72,7 +74,8 @@ class PSIControlFeatureExtractor(nn.Module):
         self.temporal_compression = temporal_compression
         self.spatial_compression = spatial_compression
         self.device = device
-        self.mask_ratio = mask_ratio
+        self.mask_ratio_cond = mask_ratio_cond
+        self.mask_ratio_pred = mask_ratio_pred
         self.prompt_template = prompt_template
         self.temperature = temperature
         self.top_p = top_p
@@ -211,11 +214,21 @@ class PSIControlFeatureExtractor(nn.Module):
                 rgb_frames.append(frame_np)
             
             # Create masks for the 2 frames
-            unmask_indices_rgb = self.create_mask_indices(
-                self.mask_ratio, 
-                2,  # Only 2 frames
+            # Frame 0 (conditioning): fully visible or lightly masked
+            # Frame 1 (prediction target): heavily masked so PSI extracts features
+            # IMPORTANT: The prediction frame MUST be masked, otherwise PSI thinks
+            # there's nothing to predict and n_pred_seq=0, causing a reshape error
+            unmask_indices_frame0 = self.create_mask_indices(
+                mask_ratio=self.mask_ratio_cond,  # Default: 0.0 (fully visible)
+                num_frames=1,
                 seed=self.seed + b
             )
+            unmask_indices_frame1 = self.create_mask_indices(
+                mask_ratio=self.mask_ratio_pred,  # Default: 0.9 (90% masked)
+                num_frames=1, 
+                seed=self.seed + b + 1
+            )
+            unmask_indices_rgb = unmask_indices_frame0 + unmask_indices_frame1
             
             # Generate prompt for PSI: "rgb0,rgb1->rgb1"
             prompt = "rgb0,rgb1->rgb1"
