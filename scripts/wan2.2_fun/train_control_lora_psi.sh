@@ -44,13 +44,20 @@ export MAX_TRAIN_STEPS=10000
 # Validation settings
 export VALIDATION_STEPS=1000
 export VALIDATION_PROMPTS=(
-    "A person dancing gracefully"
-    "A person walking forward"
+    ""
+    ""
+    ""
+    ""
+    ""
 )
 export VALIDATION_PATHS=(
-    "/scratch/m000063/data/bvd2/handpicked/video1.mp4"  # UPDATE THESE!
-    "/scratch/m000063/data/bvd2/handpicked/video2.mp4"
+    "/scratch/m000063/data/bvd2/handpicked/vYAUIF61MCo_part0000.mp4"
+    "/scratch/m000063/data/bvd2/handpicked/yqDBM7LyNZQ_part0001.mp4"
+    "/scratch/m000063/data/bvd2/handpicked/nXpp2e6cv20_part0028.mp4"
+    "/scratch/m000063/data/bvd2/handpicked/1lYYXkLMhbY_part0016.mp4"
+    "/scratch/m000063/data/bvd2/handpicked/QYiddvAhffI_part0002.mp4"
 )
+
 
 # Video settings
 export VIDEO_SAMPLE_SIZE=512
