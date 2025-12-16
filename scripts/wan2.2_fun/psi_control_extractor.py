@@ -92,7 +92,12 @@ class PSIControlFeatureExtractor(nn.Module):
             device=device
         )
         
-        print("✓ PSIPredictor loaded successfully")
+        # Freeze PSI predictor - always use in inference mode
+        self.predictor.eval()
+        for param in self.predictor.parameters():
+            param.requires_grad = False
+        
+        print("✓ PSIPredictor loaded successfully (frozen mode)")
         
         # Projection layer to adapt PSI output to expected latent dimensions
         # PSI outputs may have different channel dimensions than VAE latents
@@ -191,8 +196,8 @@ class PSIControlFeatureExtractor(nn.Module):
             # Create time codes (evenly spaced)
             time_codes = [int(i * 1000 / num_frames) for i in range(num_frames)]
             
-            # Call parallel_extract_features
-            try:
+            # Call parallel_extract_features (no gradients needed)
+            with torch.no_grad():
                 outputs = self.predictor.parallel_extract_features(
                     prompt=prompt,
                     rgb_frames=rgb_frames,
@@ -214,98 +219,100 @@ class PSIControlFeatureExtractor(nn.Module):
                     top_k=self.top_k,
                     out_dir=None,
                 )
-                
-                # Extract feature tensor from outputs
-                # The output format depends on PSI implementation
-                # Typically it returns a dict with 'features' or similar key
-                if isinstance(outputs, dict):
-                    # Try common keys
-                    feature_tensor = None
-                    for key in ['features', 'embeddings', 'latents', 'hidden_states']:
-                        if key in outputs and isinstance(outputs[key], torch.Tensor):
-                            feature_tensor = outputs[key]
-                            break
-                    
-                    if feature_tensor is None:
-                        # If not found, try to use any tensor in the output
-                        for key, value in outputs.items():
-                            if isinstance(value, torch.Tensor):
-                                feature_tensor = value
-                                break
-                    
-                    if feature_tensor is None:
-                        raise ValueError(f"Could not find feature tensor in PSI outputs. Keys: {list(outputs.keys())}")
-                
-                elif isinstance(outputs, torch.Tensor):
-                    feature_tensor = outputs
-                else:
-                    raise ValueError(f"Unexpected PSI output type: {type(outputs)}")
-                
-                # Ensure feature tensor is on the correct device
-                feature_tensor = feature_tensor.to(control_pixel_values.device)
-                
-                # Expected shape: (C, F, H, W) or (F, C, H, W) or similar
-                # We need to reshape/transpose to (C, F, H_latent, W_latent)
-                
-                # Add batch dimension if needed
-                if feature_tensor.dim() == 4:
-                    # Assume (C, F, H, W) or (F, C, H, W)
-                    if feature_tensor.shape[1] == num_frames:
-                        # (C, F, H, W) - already correct
-                        pass
-                    elif feature_tensor.shape[0] == num_frames:
-                        # (F, C, H, W) - transpose
-                        feature_tensor = feature_tensor.permute(1, 0, 2, 3)
-                
-                # Resize to match expected latent dimensions if needed
-                if feature_tensor.shape[-2:] != (h_latent, w_latent):
-                    # Reshape spatial dimensions
-                    c, f, h, w = feature_tensor.shape
-                    feature_tensor = feature_tensor.reshape(c * f, h, w).unsqueeze(0)  # (1, C*F, H, W)
-                    feature_tensor = torch.nn.functional.interpolate(
-                        feature_tensor,
-                        size=(h_latent, w_latent),
-                        mode='bilinear',
-                        align_corners=False
-                    )
-                    feature_tensor = feature_tensor.squeeze(0).reshape(c, f, h_latent, w_latent)
-                
-                # Create projection layer if needed
-                current_channels = feature_tensor.shape[0]
-                if self.projection is None and current_channels != self.latent_channels:
-                    print(f"Creating projection layer: {current_channels} -> {self.latent_channels} channels")
-                    self.projection = nn.Conv2d(
-                        current_channels, 
-                        self.latent_channels, 
-                        kernel_size=1
-                    ).to(control_pixel_values.device, control_pixel_values.dtype)
-                
-                # Apply projection if needed
-                if self.projection is not None:
-                    # Process each frame through projection
-                    c, f, h, w = feature_tensor.shape
-                    feature_tensor = feature_tensor.permute(1, 0, 2, 3).reshape(f, c, h, w)  # (F, C, H, W)
-                    projected_frames = []
-                    for frame_feat in feature_tensor:
-                        projected = self.projection(frame_feat.unsqueeze(0))  # (1, C_out, H, W)
-                        projected_frames.append(projected.squeeze(0))
-                    feature_tensor = torch.stack(projected_frames, dim=1)  # (C_out, F, H, W)
-                
-                batch_embeddings.append(feature_tensor)
-                
-            except Exception as e:
-                print(f"Warning: PSI feature extraction failed for batch {b}: {e}")
-                print("Falling back to zero embeddings")
-                # Fallback: create zero embeddings
-                fallback_embedding = torch.zeros(
-                    self.latent_channels,
-                    num_frames,
-                    h_latent,
-                    w_latent,
-                    device=control_pixel_values.device,
-                    dtype=control_pixel_values.dtype
+            
+            # Extract features from PSI predictor outputs
+            # Output structure:
+            # - hidden_state_coarse_2d_list: list of (1, 32, 32, 1, 4096) per frame
+            # - embeddings_coarse_2d_list: list of (1, 32, 32, 1, 4096) per frame
+            # We use: ALL hidden states + ONLY UNMASKED embeddings
+            
+            if not isinstance(outputs, dict):
+                raise ValueError(f"Expected dict output from PSI, got {type(outputs)}")
+            
+            # Extract the feature lists
+            hidden_states_list = outputs.get('hidden_state_coarse_2d_list', None)
+            embeddings_list = outputs.get('embeddings_coarse_2d_list', None)
+            
+            if hidden_states_list is None or embeddings_list is None:
+                raise ValueError(
+                    f"PSI output missing required keys. "
+                    f"Expected: 'hidden_state_coarse_2d_list', 'embeddings_coarse_2d_list'. "
+                    f"Got: {list(outputs.keys())}"
                 )
-                batch_embeddings.append(fallback_embedding)
+            
+            # Process each frame's features
+            frame_features = []
+            for frame_idx in range(num_frames):
+                # Get features for this frame (last index = target frame being predicted)
+                # Shape: (1, 32, 32, 1, 4096)
+                hidden_state = hidden_states_list[frame_idx]
+                embeddings = embeddings_list[frame_idx]
+                
+                # Remove extra dimensions: (1, 32, 32, 1, 4096) -> (32, 32, 4096)
+                hidden_state = hidden_state.squeeze(0).squeeze(-2)  # (32, 32, 4096)
+                embeddings = embeddings.squeeze(0).squeeze(-2)  # (32, 32, 4096)
+                
+                # Use ALL hidden states and ALL embeddings (no masking)
+                hidden_features = hidden_state  # (32, 32, 4096)
+                embedding_features = embeddings  # (32, 32, 4096)
+                
+                # Combine hidden states and embeddings
+                # Option 1: Concatenate along feature dimension
+                combined = torch.cat([hidden_features, embedding_features], dim=-1)  # (32, 32, 8192)
+                
+                # Option 2: Just use hidden states (uncomment if preferred)
+                # combined = hidden_features  # (32, 32, 4096)
+                
+                # Option 3: Just use embeddings (uncomment if preferred)
+                # combined = embedding_features  # (32, 32, 4096)
+                
+                frame_features.append(combined)
+            
+            # Stack frames: (F, 32, 32, D)
+            feature_tensor = torch.stack(frame_features, dim=0)
+            F, H_psi, W_psi, D = feature_tensor.shape
+            
+            # Reshape to (D, F, 32, 32) for consistency with control embedding format
+            feature_tensor = feature_tensor.permute(3, 0, 1, 2)  # (D, F, 32, 32)
+            
+            # Ensure correct device
+            feature_tensor = feature_tensor.to(control_pixel_values.device)
+            
+            # Resize spatial dimensions to match VAE latent size if needed
+            if (H_psi, W_psi) != (h_latent, w_latent):
+                # Reshape for interpolation: (D, F, 32, 32) -> (D*F, 32, 32) -> (1, D*F, 32, 32)
+                D, F, H_psi, W_psi = feature_tensor.shape
+                feature_tensor = feature_tensor.reshape(D * F, H_psi, W_psi).unsqueeze(0)
+                feature_tensor = torch.nn.functional.interpolate(
+                    feature_tensor,
+                    size=(h_latent, w_latent),
+                    mode='bilinear',
+                    align_corners=False
+                )
+                feature_tensor = feature_tensor.squeeze(0).reshape(D, F, h_latent, w_latent)
+            
+            # Create projection layer if needed (project from D=8192 to latent_channels=16)
+            current_channels = feature_tensor.shape[0]
+            if self.projection is None and current_channels != self.latent_channels:
+                print(f"Creating projection layer: {current_channels} -> {self.latent_channels} channels")
+                self.projection = nn.Conv2d(
+                    current_channels, 
+                    self.latent_channels, 
+                    kernel_size=1
+                ).to(control_pixel_values.device, control_pixel_values.dtype)
+            
+            # Apply projection if needed
+            if self.projection is not None:
+                # Process each frame through projection
+                D, F, H, W = feature_tensor.shape
+                feature_tensor = feature_tensor.permute(1, 0, 2, 3).reshape(F, D, H, W)  # (F, D, H, W)
+                projected_frames = []
+                for frame_feat in feature_tensor:
+                    projected = self.projection(frame_feat.unsqueeze(0))  # (1, C_out, H, W)
+                    projected_frames.append(projected.squeeze(0))
+                feature_tensor = torch.stack(projected_frames, dim=1)  # (C_out, F, H, W)
+            
+            batch_embeddings.append(feature_tensor)
         
         # Stack batch: (B, C_out, F, H_latent, W_latent)
         control_embeddings = torch.stack(batch_embeddings, dim=0)
