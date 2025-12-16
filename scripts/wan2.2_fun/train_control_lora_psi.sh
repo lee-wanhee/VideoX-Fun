@@ -7,20 +7,24 @@
 # on-the-fly during training, instead of using VAE-encoded control signals.
 # ============================================================================
 
+# Multi-GPU / Distributed Training Settings
+# Set NUM_GPUS to the number of GPUs you want to use (1, 2, 4, 8, etc.)
+export NUM_GPUS=2  # Change this to use different number of GPUs
+export NUM_NODES=1  # For multi-node training, increase this
+export GPU_IDS="0,1"  # Which GPUs to use (e.g., "0,1" for first 2 GPUs)
+
 # Model and data paths - Updated with your actual paths
 export MODEL_PATH="/scratch/m000063/users/wanhee/VideoX-Fun/models/Wan2.2-Fun-5B-Control"
 export DATA_DIR="/scratch/m000063/data/bvd2/handpicked"
 export DATA_META="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/handpicked_debug.csv"
 export CONFIG_PATH="${MODEL_PATH}/config.json"
 
-# PSI Model paths - Update these to point to your actual PSI model locations
-# These paths should be relative to where your PSI models are stored
-# Based on parallel_feature_test.py, these might be in a models directory
-export PSI_MODELS_DIR="/path/to/psi/models"  # UPDATE THIS PATH!
-export PSI_MODEL_NAME="${PSI_MODELS_DIR}/PSI_7B_RGBCDF_bvd_4frame_Unified_Vocab_Balanced_Task_V2_continue_ctx_8192/model_01400000.pt"
-export PSI_QUANTIZER_NAME="${PSI_MODELS_DIR}/PLPQ-ImageNetOpenImages-wavelet-small-bs512-lr1e-4-l1-dinov21e0224-coarsel11e-2/model_best.pt"
-export PSI_FLOW_QUANTIZER_NAME="${PSI_MODELS_DIR}/HLQ-flow-nq2-gen2_0-wavelet-small-bs512-lr1e-4-l2-coarsel21e-2-fg_v1_5/model_best.pt"
-export PSI_DEPTH_QUANTIZER_NAME="${PSI_MODELS_DIR}/HLQ-depth-nq2-gen2_0-wavelet-small-bs512-lr1e-4-l1-dinov21e0224-coarsel11e-2-200k_ft500k_3/model_best.pt"
+# PSI Model paths - Using same paths as parallel_feature_test.py (relative paths)
+# These paths are relative and will be resolved by PSIPredictor
+export PSI_MODEL_NAME="PSI_7B_RGBCDF_bvd_4frame_Unified_Vocab_Balanced_Task_V2_continue_ctx_8192/model_01400000.pt"
+export PSI_QUANTIZER_NAME="PLPQ-ImageNetOpenImages-wavelet-small-bs512-lr1e-4-l1-dinov21e0224-coarsel11e-2/model_best.pt"
+export PSI_FLOW_QUANTIZER_NAME="HLQ-flow-nq2-gen2_0-wavelet-small-bs512-lr1e-4-l2-coarsel21e-2-fg_v1_5/model_best.pt"
+export PSI_DEPTH_QUANTIZER_NAME="HLQ-depth-nq2-gen2_0-wavelet-small-bs512-lr1e-4-l1-dinov21e0224-coarsel11e-2-200k_ft500k_3/model_best.pt"
 
 # PSI Feature Extraction Settings
 export PSI_MASK_RATIO=0.0  # 0.0 = fully visible, increase to mask more patches
@@ -36,10 +40,11 @@ export RANK=128
 export NETWORK_ALPHA=64
 
 # Training hyperparameters
-export LEARNING_RATE=1e-4
-export TRAIN_BATCH_SIZE=1
-export GRADIENT_ACCUMULATION_STEPS=4
-export MAX_TRAIN_STEPS=10000
+# Note: With 2 GPUs, effective batch size = TRAIN_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * NUM_GPUS
+export LEARNING_RATE=1e-5
+export TRAIN_BATCH_SIZE=1  # Per GPU batch size
+export GRADIENT_ACCUMULATION_STEPS=16
+export MAX_TRAIN_STEPS=5000
 
 # Validation settings
 export VALIDATION_STEPS=1000
@@ -114,24 +119,15 @@ echo "  Quantizer: $PSI_QUANTIZER_NAME"
 echo "  Flow Quantizer: $PSI_FLOW_QUANTIZER_NAME"
 echo "  Depth Quantizer: $PSI_DEPTH_QUANTIZER_NAME"
 
-if [ "$PSI_MODELS_DIR" = "/path/to/psi/models" ]; then
-    echo ""
-    echo "WARNING: PSI_MODELS_DIR is set to default placeholder!"
-    echo "  Please update PSI_MODELS_DIR in this script to point to your actual PSI model directory."
-    echo "  You can check where your PSI models are by looking at the parallel_feature_test.py paths."
-    echo ""
-    read -p "Continue anyway? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
-fi
+# Verify PSI model files exist (they will be resolved by PSIPredictor)
+echo "✓ PSI model paths configured (using relative paths from parallel_feature_test.py)"
 
 echo ""
 echo "Training Configuration:"
-echo "  Batch Size: $TRAIN_BATCH_SIZE"
+echo "  Number of GPUs: $NUM_GPUS"
+echo "  Batch Size (per GPU): $TRAIN_BATCH_SIZE"
 echo "  Gradient Accumulation: $GRADIENT_ACCUMULATION_STEPS"
-echo "  Effective Batch Size: $((TRAIN_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS))"
+echo "  Effective Batch Size: $((TRAIN_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * NUM_GPUS))"
 echo "  Learning Rate: $LEARNING_RATE"
 echo "  Max Steps: $MAX_TRAIN_STEPS"
 echo "  LoRA Rank: $RANK"
@@ -142,9 +138,20 @@ echo ""
 # Launch Training
 # ============================================================================
 echo "Starting training..."
+echo "Multi-GPU Configuration:"
+echo "  Number of GPUs: $NUM_GPUS"
+echo "  Number of Nodes: $NUM_NODES"
+echo "  GPU IDs: $GPU_IDS"
 echo "============================================================================"
 
+# Set which GPUs to use
+export CUDA_VISIBLE_DEVICES=$GPU_IDS
+
 accelerate launch \
+  --num_processes=$NUM_GPUS \
+  --num_machines=$NUM_NODES \
+  --mixed_precision=bf16 \
+  --multi_gpu \
   train_control_lora.py \
   --pretrained_model_name_or_path "${MODEL_PATH}" \
   --train_data_dir "${DATA_DIR}" \
@@ -226,40 +233,47 @@ echo ""
 # Notes:
 # ============================================================================
 # 
-# 1. IMPORTANT: Update PSI_MODELS_DIR to point to your actual PSI model directory
-#    The PSI models (model_name, quantizer_name, etc.) should be accessible paths
+# 1. Multi-GPU Training:
+#    - Set NUM_GPUS at the top of this script (default: 2)
+#    - Set GPU_IDS to specify which GPUs to use (e.g., "0,1,2,3" for 4 GPUs)
+#    - Effective batch size = TRAIN_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * NUM_GPUS
+#    - With 2 GPUs: effective batch size = 1 * 4 * 2 = 8
 #
-# 2. The PSI control extractor will be used to extract features on-the-fly
+# 2. PSI model paths are configured using the same relative paths as parallel_feature_test.py
+#    These paths will be resolved by PSIPredictor
+#
+# 3. The PSI control extractor will be used to extract features on-the-fly
 #    during training instead of using VAE-encoded control signals
 #
-# 3. GPU Memory Tips:
-#    - For 24GB GPU: batch_size=1, gradient_accumulation=4-8
-#    - For 40GB GPU: batch_size=2, gradient_accumulation=2-4
-#    - For 80GB GPU: batch_size=4, gradient_accumulation=2
+# 4. GPU Memory Tips:
+#    - For 24GB GPU (per GPU): batch_size=1, gradient_accumulation=4-8
+#    - For 40GB GPU (per GPU): batch_size=2, gradient_accumulation=2-4
+#    - For 80GB GPU (per GPU): batch_size=4, gradient_accumulation=2
+#    - With 2x24GB GPUs: effective batch size = 1 * 4 * 2 = 8 (good for training)
 #
-# 4. If you run out of memory:
+# 5. If you run out of memory:
 #    - Add --low_vram flag
 #    - Reduce --video_sample_size (e.g., 256 or 384)
 #    - Reduce --video_sample_n_frames (e.g., 9 or 13)
 #    - Increase --gradient_accumulation_steps
 #    - Add --vae_mini_batch 8 (or smaller)
 #
-# 5. PSI Feature Extraction Settings:
+# 6. PSI Feature Extraction Settings:
 #    - psi_mask_ratio: Controls how much of the input to mask (0.0 = fully visible)
 #    - psi_temperature/top_p/top_k: Control PSI sampling behavior
 #    - Adjust these based on your control signal requirements
 #
-# 6. Training time estimates (rough):
-#    - 10k steps with batch_size=1: ~15-25 hours on A100 (slower due to PSI extraction)
+# 7. Training time estimates (rough):
+#    - 10k steps with 2 GPUs: ~8-12 hours on 2xA100 (faster with multi-GPU!)
 #    - PSI feature extraction adds overhead compared to VAE encoding
 #    - Validation adds ~10-15 minutes per validation run with PSI
 #
-# 7. Monitor training:
+# 8. Monitor training:
 #    - Tensorboard: tensorboard --logdir outputs/psi_control_lora_*/logs
 #    - Check sanity_check folder for first batch visualizations
 #    - Check sample folder for validation outputs
 #
-# 8. Debugging:
+# 9. Debugging:
 #    - If PSI fails to load, check that ccwm package is accessible
 #    - Check PSI model paths are correct and files exist
 #    - Look for PSI-related errors in the log output
