@@ -17,7 +17,7 @@ export CONFIG_PATH="${MODEL_PATH}/config.json"
 # These paths should be relative to where your PSI models are stored
 # Based on parallel_feature_test.py, these might be in a models directory
 export PSI_MODELS_DIR="/path/to/psi/models"  # UPDATE THIS PATH!
-export PSI_MODEL_NAME="${PSI_MODELS_DIR}/PSI_7B_RGBCDF_bvd_4frame_Unified_Vocab_Balanced_Task_V2_continue_ctx_8192/model_01400000.pt"
+export PSI_MODEL_NAME="${PSI_MODELS_DIR}/PSI_7B_RGBCDF_bvd_4frame_Unified_Vocab_Balanced_Task_V2_continue_ctx_8192/model_01500000.pt"
 export PSI_QUANTIZER_NAME="${PSI_MODELS_DIR}/PLPQ-ImageNetOpenImages-wavelet-small-bs512-lr1e-4-l1-dinov21e0224-coarsel11e-2/model_best.pt"
 export PSI_FLOW_QUANTIZER_NAME="${PSI_MODELS_DIR}/HLQ-flow-nq2-gen2_0-wavelet-small-bs512-lr1e-4-l2-coarsel21e-2-fg_v1_5/model_best.pt"
 export PSI_DEPTH_QUANTIZER_NAME="${PSI_MODELS_DIR}/HLQ-depth-nq2-gen2_0-wavelet-small-bs512-lr1e-4-l1-dinov21e0224-coarsel11e-2-200k_ft500k_3/model_best.pt"
