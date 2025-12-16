@@ -355,7 +355,7 @@ class PSIControlFeatureExtractor(nn.Module):
                     current_channels, 
                     self.latent_channels, 
                     kernel_size=1
-                ).to(control_pixel_values.device, control_pixel_values.dtype)
+                ).to(feature_tensor.device, feature_tensor.dtype)
             
             # Apply projection if needed
             if self.projection is not None:
