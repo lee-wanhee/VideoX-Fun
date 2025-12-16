@@ -87,6 +87,94 @@ if is_wandb_available():
     import wandb
 
 
+# ============================================================================
+# Dummy Control Feature Extractor
+# ============================================================================
+class DummyControlFeatureExtractor(torch.nn.Module):
+    """
+    Dummy control feature extractor for placeholder implementation.
+    
+    TODO: Replace this with your actual control feature extraction model.
+    
+    Input: control_pixel_values (B, F, C, H, W) - normalized to [-1, 1]
+    Output: control_embeddings (B, C_out, F, H_latent, W_latent)
+    
+    The output dimensions should match what the transformer expects for control inputs.
+    """
+    def __init__(self, latent_channels=16, temporal_compression=4, spatial_compression=8):
+        super().__init__()
+        self.latent_channels = latent_channels
+        self.temporal_compression = temporal_compression
+        self.spatial_compression = spatial_compression
+        
+        # TODO: Initialize your actual control feature extraction model here
+        # For now, we use a simple placeholder network
+        self.dummy_conv = torch.nn.Conv2d(3, latent_channels, kernel_size=1)
+        
+    def forward(self, control_pixel_values):
+        """
+        Extract control features from input video frames.
+        
+        Args:
+            control_pixel_values: (B, F, C, H, W) tensor, values in [-1, 1]
+        
+        Returns:
+            control_embeddings: (B, C_out, F, H_latent, W_latent) tensor
+        """
+        # TODO: Implement your actual feature extraction logic here
+        # This is just a placeholder implementation
+        
+        batch_size, num_frames, channels, height, width = control_pixel_values.shape
+        
+        # Calculate output spatial dimensions
+        h_latent = height // self.spatial_compression
+        w_latent = width // self.spatial_compression
+        
+        # Process frames (placeholder - just creates dummy embeddings)
+        # In practice, you would run your control model here
+        control_embeddings = torch.zeros(
+            batch_size, 
+            self.latent_channels, 
+            num_frames, 
+            h_latent, 
+            w_latent,
+            device=control_pixel_values.device,
+            dtype=control_pixel_values.dtype
+        )
+        
+        # Optional: Add some dummy processing to verify the pipeline works
+        # Remove this when implementing actual extraction
+        for i in range(num_frames):
+            frame = control_pixel_values[:, i]  # (B, C, H, W)
+            # Downsample and process
+            frame_down = torch.nn.functional.interpolate(
+                frame, 
+                size=(h_latent, w_latent), 
+                mode='bilinear', 
+                align_corners=False
+            )
+            control_embeddings[:, :, i] = self.dummy_conv(frame_down)
+        
+        return control_embeddings
+    
+    @classmethod
+    def from_pretrained(cls, model_path, **kwargs):
+        """
+        Load the control feature extractor from a pretrained checkpoint.
+        
+        TODO: Implement loading logic for your actual model.
+        """
+        # For now, just return a new instance
+        model = cls(**kwargs)
+        
+        # TODO: Load actual weights if model_path exists
+        # if os.path.exists(model_path):
+        #     state_dict = torch.load(model_path, map_location='cpu')
+        #     model.load_state_dict(state_dict)
+        
+        return model
+
+
 def filter_kwargs(cls, kwargs):
     import inspect
     sig = inspect.signature(cls.__init__)
@@ -727,6 +815,17 @@ def parse_args():
         default=None,
         help=("The module is trained in loras. "),
     )
+    parser.add_argument(
+        "--use_custom_control_extractor",
+        action="store_true",
+        help="Whether to use custom control feature extractor instead of VAE for control.",
+    )
+    parser.add_argument(
+        "--control_extractor_path",
+        type=str,
+        default=None,
+        help="Path to the custom control feature extractor model.",
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -896,6 +995,26 @@ def main():
             additional_kwargs=OmegaConf.to_container(config['vae_kwargs']),
         )
         vae.eval()
+        
+        # Load custom control feature extractor if specified
+        if args.use_custom_control_extractor:
+            control_extractor = DummyControlFeatureExtractor(
+                latent_channels=vae.config.latent_channels,
+                temporal_compression=vae.config.temporal_compression_ratio,
+                spatial_compression=vae.config.spatial_compression_ratio,
+            )
+            if args.control_extractor_path is not None:
+                control_extractor = DummyControlFeatureExtractor.from_pretrained(
+                    args.control_extractor_path,
+                    latent_channels=vae.config.latent_channels,
+                    temporal_compression=vae.config.temporal_compression_ratio,
+                    spatial_compression=vae.config.spatial_compression_ratio,
+                )
+            control_extractor.eval()
+            control_extractor.requires_grad_(False)
+            logger.info("Loaded custom control feature extractor")
+        else:
+            control_extractor = None
             
     # Get Transformer
     if args.boundary_type == "low" or args.boundary_type == "full":
@@ -1505,6 +1624,10 @@ def main():
     transformer3d.to(accelerator.device, dtype=weight_dtype)
     if not args.enable_text_encoder_in_dataloader:
         text_encoder.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
+    
+    # Move control extractor to device if using custom control
+    if args.use_custom_control_extractor:
+        control_extractor.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -1815,6 +1938,8 @@ def main():
                 if args.low_vram:
                     torch.cuda.empty_cache()
                     vae.to(accelerator.device)
+                    if args.use_custom_control_extractor:
+                        control_extractor.to(accelerator.device)
                     if not args.enable_text_encoder_in_dataloader:
                         text_encoder.to("cpu")
 
@@ -1838,16 +1963,31 @@ def main():
                         latents = _batch_encode_vae(pixel_values)
 
                     if args.train_mode != "control_camera_ref":
-                        control_latents = _batch_encode_vae(control_pixel_values)
-                        # Make control latents to zero
-                        for bs_index in range(control_latents.size()[0]):
-                            if rng is None:
-                                zero_init_control_latents_conv_in = np.random.choice([0, 1], p = [0.90, 0.10])
-                            else:
-                                zero_init_control_latents_conv_in = rng.choice([0, 1], p = [0.90, 0.10])
+                        # Use custom control feature extractor or VAE
+                        if args.use_custom_control_extractor:
+                            # Extract control features using custom model
+                            control_latents = control_extractor(control_pixel_values)
+                            # Make control latents to zero (dropout for conditioning)
+                            for bs_index in range(control_latents.size()[0]):
+                                if rng is None:
+                                    zero_init_control_latents_conv_in = np.random.choice([0, 1], p = [0.90, 0.10])
+                                else:
+                                    zero_init_control_latents_conv_in = rng.choice([0, 1], p = [0.90, 0.10])
 
-                            if zero_init_control_latents_conv_in:
-                                control_latents[bs_index] = control_latents[bs_index] * 0
+                                if zero_init_control_latents_conv_in:
+                                    control_latents[bs_index] = control_latents[bs_index] * 0
+                        else:
+                            # Use VAE encoding for control (original behavior)
+                            control_latents = _batch_encode_vae(control_pixel_values)
+                            # Make control latents to zero
+                            for bs_index in range(control_latents.size()[0]):
+                                if rng is None:
+                                    zero_init_control_latents_conv_in = np.random.choice([0, 1], p = [0.90, 0.10])
+                                else:
+                                    zero_init_control_latents_conv_in = rng.choice([0, 1], p = [0.90, 0.10])
+
+                                if zero_init_control_latents_conv_in:
+                                    control_latents[bs_index] = control_latents[bs_index] * 0
                         control_camera_latents = None
                     else:
                         control_latents = None
@@ -1934,6 +2074,8 @@ def main():
 
                 if args.low_vram:
                     vae.to('cpu')
+                    if args.use_custom_control_extractor:
+                        control_extractor.to('cpu')
                     torch.cuda.empty_cache()
                     if not args.enable_text_encoder_in_dataloader:
                         text_encoder.to(accelerator.device)
