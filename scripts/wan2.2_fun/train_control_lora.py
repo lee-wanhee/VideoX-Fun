@@ -826,6 +826,59 @@ def parse_args():
         default=None,
         help="Path to the custom control feature extractor model.",
     )
+    parser.add_argument(
+        "--use_psi_control_extractor",
+        action="store_true",
+        help="Whether to use PSI (PSIPredictor) as the control feature extractor.",
+    )
+    parser.add_argument(
+        "--psi_model_name",
+        type=str,
+        default=None,
+        help="Path to PSI model checkpoint (e.g., PSI_7B_...../model_01400000.pt)",
+    )
+    parser.add_argument(
+        "--psi_quantizer_name",
+        type=str,
+        default=None,
+        help="Path to PSI quantizer checkpoint (e.g., PLPQ-....../model_best.pt)",
+    )
+    parser.add_argument(
+        "--psi_flow_quantizer_name",
+        type=str,
+        default=None,
+        help="Path to PSI flow quantizer checkpoint (optional)",
+    )
+    parser.add_argument(
+        "--psi_depth_quantizer_name",
+        type=str,
+        default=None,
+        help="Path to PSI depth quantizer checkpoint (optional)",
+    )
+    parser.add_argument(
+        "--psi_mask_ratio",
+        type=float,
+        default=0.0,
+        help="Mask ratio for PSI feature extraction (0.0 = fully visible, 1.0 = fully masked)",
+    )
+    parser.add_argument(
+        "--psi_temperature",
+        type=float,
+        default=1.0,
+        help="Temperature for PSI sampling",
+    )
+    parser.add_argument(
+        "--psi_top_p",
+        type=float,
+        default=0.9,
+        help="Top-p for PSI sampling",
+    )
+    parser.add_argument(
+        "--psi_top_k",
+        type=int,
+        default=1000,
+        help="Top-k for PSI sampling",
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -997,7 +1050,40 @@ def main():
         vae.eval()
         
         # Load custom control feature extractor if specified
-        if args.use_custom_control_extractor:
+        if args.use_psi_control_extractor:
+            # Use PSI-based control extractor
+            logger.info("Loading PSI Control Feature Extractor...")
+            if args.psi_model_name is None or args.psi_quantizer_name is None:
+                raise ValueError(
+                    "When using --use_psi_control_extractor, you must specify both "
+                    "--psi_model_name and --psi_quantizer_name"
+                )
+            
+            from psi_control_extractor import PSIControlFeatureExtractor
+            
+            psi_config = {
+                'model_name': args.psi_model_name,
+                'quantizer_name': args.psi_quantizer_name,
+                'flow_quantizer_name': args.psi_flow_quantizer_name,
+                'depth_quantizer_name': args.psi_depth_quantizer_name,
+                'latent_channels': vae.config.latent_channels,
+                'temporal_compression': vae.config.temporal_compression_ratio,
+                'spatial_compression': vae.config.spatial_compression_ratio,
+                'device': accelerator.device,
+                'mask_ratio': args.psi_mask_ratio,
+                'temperature': args.psi_temperature,
+                'top_p': args.psi_top_p,
+                'top_k': args.psi_top_k,
+                'seed': args.seed,
+            }
+            
+            control_extractor = PSIControlFeatureExtractor.from_pretrained(psi_config)
+            control_extractor.eval()
+            control_extractor.requires_grad_(False)
+            logger.info("✓ PSI Control Feature Extractor loaded successfully")
+            
+        elif args.use_custom_control_extractor:
+            # Use custom dummy control extractor
             control_extractor = DummyControlFeatureExtractor(
                 latent_channels=vae.config.latent_channels,
                 temporal_compression=vae.config.temporal_compression_ratio,
