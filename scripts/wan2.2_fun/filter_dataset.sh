@@ -15,8 +15,8 @@ export VIDEO_SAMPLE_STRIDE=2
 export MIN_FRAMES=$((($VIDEO_SAMPLE_N_FRAMES - 1) * $VIDEO_SAMPLE_STRIDE + 1))
 
 # Input/Output paths - UPDATE THESE FOR YOUR DATASET
-export INPUT_CSV="/ccn2/u/wanhee/VideoX-Fun/datasets/kinetics700.csv"
-export OUTPUT_CSV="/ccn2/u/wanhee/VideoX-Fun/datasets/kinetics700_filtered_${VIDEO_SAMPLE_N_FRAMES}frames.csv"
+export INPUT_CSV="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/handpicked.csv"
+export OUTPUT_CSV="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/handpicked_filtered_${VIDEO_SAMPLE_N_FRAMES}frames.csv"
 export DATA_ROOT=""  # Leave empty if CSV has absolute paths, otherwise set to your data directory
 
 # Optional: save detailed report
