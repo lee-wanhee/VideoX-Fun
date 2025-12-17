@@ -236,7 +236,7 @@ check_min_version("0.18.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
-def log_validation(vae, text_encoder, tokenizer, transformer3d, network, config, args, accelerator, weight_dtype, global_step):
+def log_validation(vae, text_encoder, tokenizer, transformer3d, network, config, args, accelerator, weight_dtype, global_step, control_extractor=None):
     try:
         logger.info("Running validation... ")
 
@@ -309,6 +309,108 @@ def log_validation(vae, text_encoder, tokenizer, transformer3d, network, config,
                 with torch.autocast("cuda", dtype=weight_dtype):
                     video_length = int(args.video_sample_n_frames // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.video_sample_n_frames != 1 else 1
                     input_video, input_video_mask, ref_image, clip_image = get_video_to_video_latent(args.validation_paths[i], video_length=video_length, sample_size=[args.video_sample_size, args.video_sample_size])
+                    
+                    # If using PSI control extractor, save PSI visualizations
+                    if args.use_psi_control_extractor and control_extractor is not None:
+                        try:
+                            logger.info(f"Generating PSI control visualizations for validation sample {i}...")
+                            psi_viz_dir = os.path.join(args.output_dir, "sample", "psi_visualizations", f"step-{global_step}")
+                            os.makedirs(psi_viz_dir, exist_ok=True)
+                            
+                            # Extract PSI features with visualization
+                            # Load the validation video frames
+                            from ccwm.utils.image_processing import video_to_frames
+                            val_frames = video_to_frames(
+                                args.validation_paths[i], 
+                                frame_skip=0, 
+                                img_size=(args.video_sample_size, args.video_sample_size), 
+                                center_crop=True
+                            )
+                            
+                            if len(val_frames) >= 2:
+                                # Select 2 frames based on time gap
+                                fps = 30.0  # Assume 30 fps
+                                frame_gap = max(1, int(args.psi_time_gap_sec * fps))
+                                frame_idx_0 = 0
+                                frame_idx_1 = min(frame_gap, len(val_frames) - 1)
+                                
+                                # Convert to normalized numpy arrays [0, 1]
+                                rgb_frames = [
+                                    val_frames[frame_idx_0] / 255.0,
+                                    val_frames[frame_idx_1] / 255.0
+                                ]
+                                
+                                # Save input frames for reference
+                                from PIL import Image
+                                Image.fromarray((rgb_frames[0] * 255).astype(np.uint8)).save(
+                                    os.path.join(psi_viz_dir, f"sample-{i}_input_frame0.png")
+                                )
+                                Image.fromarray((rgb_frames[1] * 255).astype(np.uint8)).save(
+                                    os.path.join(psi_viz_dir, f"sample-{i}_input_frame1.png")
+                                )
+                                
+                                # Create masks
+                                def create_mask_indices(mask_ratio, seed, total_patches=1024):
+                                    n_unmask = int(total_patches * (1 - mask_ratio))
+                                    unmask_indices = np.random.RandomState(seed).choice(
+                                        total_patches, n_unmask, replace=False
+                                    ).tolist()
+                                    return unmask_indices
+                                
+                                unmask_indices_frame0 = create_mask_indices(
+                                    mask_ratio=0.0, seed=args.seed + i
+                                )
+                                unmask_indices_frame1 = create_mask_indices(
+                                    mask_ratio=0.9, seed=args.seed + i + 1
+                                )
+                                unmask_indices_rgb = [unmask_indices_frame0, unmask_indices_frame1]
+                                
+                                # Call PSI with visualization output
+                                time_codes = [0, int(args.psi_time_gap_sec * 1000)]
+                                prompt = "rgb0,rgb1->rgb1"
+                                
+                                psi_outputs = control_extractor.predictor.parallel_extract_features(
+                                    prompt=prompt,
+                                    rgb_frames=rgb_frames,
+                                    flow_frames=None,
+                                    depth_frames=None,
+                                    unmask_indices_rgb=unmask_indices_rgb,
+                                    unmask_indices_flow=None,
+                                    unmask_indices_depth=None,
+                                    camposes=None,
+                                    use_campose_scale=True,
+                                    time_codes=time_codes,
+                                    index_order=None,
+                                    conditioning_order=None,
+                                    poke_vectors=None,
+                                    seed=args.seed + i,
+                                    num_seq_patches=32,
+                                    temp=args.psi_temperature,
+                                    top_p=args.psi_top_p,
+                                    top_k=args.psi_top_k,
+                                    out_dir=psi_viz_dir,  # Enable visualization saving
+                                )
+                                
+                                # Save additional visualizations if available in outputs
+                                if isinstance(psi_outputs, dict):
+                                    for key, value in psi_outputs.items():
+                                        if isinstance(value, list):
+                                            for idx, item in enumerate(value):
+                                                if isinstance(item, Image.Image):
+                                                    output_path = os.path.join(psi_viz_dir, f"sample-{i}_{key}_{idx}.png")
+                                                    item.save(output_path)
+                                        elif isinstance(value, Image.Image):
+                                            output_path = os.path.join(psi_viz_dir, f"sample-{i}_{key}.png")
+                                            value.save(output_path)
+                                
+                                logger.info(f"✓ PSI visualizations saved to {psi_viz_dir}")
+                            else:
+                                logger.warning(f"Validation video {i} has less than 2 frames, skipping PSI visualization")
+                                
+                        except Exception as psi_viz_error:
+                            logger.warning(f"Failed to generate PSI visualizations for sample {i}: {psi_viz_error}")
+                    
+                    # Generate video sample with control
                     sample = pipeline(
                         args.validation_prompts[i], 
                         num_frames = video_length,
@@ -2357,6 +2459,7 @@ def main():
                             accelerator,
                             weight_dtype,
                             global_step,
+                            control_extractor=control_extractor if args.use_psi_control_extractor else None,
                         )
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
@@ -2378,6 +2481,7 @@ def main():
                     accelerator,
                     weight_dtype,
                     global_step,
+                    control_extractor=control_extractor if args.use_psi_control_extractor else None,
                 )
 
     # Create the pipeline using the trained modules and save it.
