@@ -7,6 +7,12 @@
 # on-the-fly during training, instead of using VAE-encoded control signals.
 # ============================================================================
 
+# Change to project root directory
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_ROOT="$( cd "${SCRIPT_DIR}/../.." && pwd )"
+cd "${PROJECT_ROOT}"
+echo "Working directory: $(pwd)"
+
 # Multi-GPU / Distributed Training Settings
 # Set NUM_GPUS to the number of GPUs you want to use (1, 2, 4, 8, etc.)
 export NUM_GPUS=2  # Change this to use different number of GPUs
@@ -17,7 +23,7 @@ export GPU_IDS="0,1"  # Which GPUs to use (e.g., "0,1" for first 2 GPUs)
 export MODEL_PATH="/ccn2/u/wanhee/VideoX-Fun/models/Wan2.2-Fun-5B-Control"
 export DATA_DIR="/ccn2/dataset/bvd2/processed/kinetics700/"
 export DATA_META="/ccn2/u/wanhee/VideoX-Fun/datasets/kinetics700.csv"
-export CONFIG_PATH="config/wan2.2/wan_civitai_5b.yaml"
+export CONFIG_PATH="/ccn2/u/wanhee/VideoX-Fun/config/wan2.2/wan_civitai_5b.yaml"
 
 # PSI Model paths - Using same paths as parallel_feature_test.py (relative paths)
 # These paths are relative and will be resolved by PSIPredictor
@@ -161,7 +167,7 @@ accelerate launch \
   --num_machines=$NUM_NODES \
   --mixed_precision=bf16 \
   --multi_gpu \
-  train_control_lora.py \
+  scripts/wan2.2_fun/train_control_lora.py \
   --pretrained_model_name_or_path "${MODEL_PATH}" \
   --train_data_dir "${DATA_DIR}" \
   --train_data_meta "${DATA_META}" \
