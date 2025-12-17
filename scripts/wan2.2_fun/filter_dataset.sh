@@ -20,7 +20,7 @@ export OUTPUT_CSV="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/handpicked_
 export DATA_ROOT=""  # Leave empty if CSV has absolute paths, otherwise set to your data directory
 
 # Optional: save detailed report
-export REPORT_FILE="/ccn2/u/wanhee/VideoX-Fun/datasets/filtering_report_${VIDEO_SAMPLE_N_FRAMES}frames.txt"
+export REPORT_FILE="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/filtering_report_${VIDEO_SAMPLE_N_FRAMES}frames.txt"
 
 # Number of parallel workers (adjust based on your CPU cores)
 export NUM_WORKERS=16
@@ -67,7 +67,7 @@ fi
 echo "Starting filtering process..."
 echo ""
 
-python /ccn2/u/wanhee/VideoX-Fun/scripts/wan2.2_fun/filter_videos_by_frame_count.py \
+python /scratch/m000063/users/wanhee/VideoX-Fun/scripts/wan2.2_fun/filter_videos_by_frame_count.py \
     --input_csv "$INPUT_CSV" \
     --output_csv "$OUTPUT_CSV" \
     --min_frames $MIN_FRAMES \
