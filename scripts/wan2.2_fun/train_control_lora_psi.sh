@@ -16,7 +16,7 @@ export GPU_IDS="0,1"  # Which GPUs to use (e.g., "0,1" for first 2 GPUs)
 # Model and data paths - Updated with your actual paths
 export MODEL_PATH="/scratch/m000063/users/wanhee/VideoX-Fun/models/Wan2.2-Fun-5B-Control"
 export DATA_DIR="/scratch/m000063/data/bvd2/handpicked"
-export DATA_META="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/handpicked.csv"
+export DATA_META="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/handpicked_filtered_81frames.csv"
 export CONFIG_PATH="${MODEL_PATH}/config.json"
 
 # PSI Model paths - Using same paths as parallel_feature_test.py (relative paths)
