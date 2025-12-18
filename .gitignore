@@ -12,6 +12,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 scripts_demo*
+out*
 
 # C extensions
 *.so
