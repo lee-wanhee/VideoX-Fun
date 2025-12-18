@@ -17,7 +17,7 @@ export GPU_IDS="0,1"  # Which GPUs to use (e.g., "0,1" for first 2 GPUs)
 export MODEL_PATH="/scratch/m000063/users/wanhee/VideoX-Fun/models/Wan2.2-Fun-5B-Control"
 export DATA_DIR="/scratch/m000063/data/bvd2/handpicked"
 export DATA_META="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/handpicked_filtered_81frames.csv"
-export CONFIG_PATH="${MODEL_PATH}/config.json"
+export CONFIG_PATH="/ccn2/u/wanhee/VideoX-Fun/config/wan2.2/wan_civitai_5b.yaml"
 
 # PSI Model paths - Using same paths as parallel_feature_test.py (relative paths)
 # These paths are relative and will be resolved by PSIPredictor
