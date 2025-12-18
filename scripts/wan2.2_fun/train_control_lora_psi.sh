@@ -43,12 +43,12 @@ export NETWORK_ALPHA=32
 # Training hyperparameters
 # Note: With 2 GPUs, effective batch size = TRAIN_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * NUM_GPUS
 export LEARNING_RATE=1e-5
-export TRAIN_BATCH_SIZE=1  # Per GPU batch size
-export GRADIENT_ACCUMULATION_STEPS=16
+export TRAIN_BATCH_SIZE=2  # Per GPU batch size - increased for better H100 utilization
+export GRADIENT_ACCUMULATION_STEPS=8  # Reduced from 16 for faster iteration
 export MAX_TRAIN_STEPS=5000
 
 # Validation settings
-export VALIDATION_STEPS=1000
+export VALIDATION_STEPS=10
 export VALIDATION_PROMPTS=(
     ""
     ""

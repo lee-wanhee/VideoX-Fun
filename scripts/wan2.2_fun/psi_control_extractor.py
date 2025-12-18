@@ -10,6 +10,7 @@ can be used as control signals for video generation.
 
 import os
 import sys
+import time
 import torch
 import torch.nn as nn
 import numpy as np
@@ -203,8 +204,10 @@ class PSIControlFeatureExtractor(nn.Module):
             
             sampled_indices = [frame_idx_0, frame_idx_1]
             
-            print(f"[PSI] Extracting control from 2 frames: {sampled_indices} "
+            print(f"[PSI GPU={self.device}] Extracting control from 2 frames: {sampled_indices} "
                   f"(out of {num_frames} total, time gap: {self.time_gap_sec}s, fps: {fps:.1f})")
+            
+            psi_start_time = time.time()
             
             # Convert ONLY the 2 sampled frames to numpy arrays
             rgb_frames = []
@@ -259,6 +262,9 @@ class PSIControlFeatureExtractor(nn.Module):
                     top_k=self.top_k,
                     out_dir=None,
                 )
+            
+            psi_elapsed = time.time() - psi_start_time
+            print(f"[PSI GPU={self.device}] Feature extraction took {psi_elapsed:.2f}s")
             
             # Extract features from PSI predictor outputs
             # Output structure:
