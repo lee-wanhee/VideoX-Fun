@@ -1177,7 +1177,7 @@ def main():
                 'latent_channels': vae.config.latent_channels,
                 'temporal_compression': vae.config.temporal_compression_ratio,
                 'spatial_compression': vae.config.spatial_compression_ratio,
-                'device': accelerator.device,
+                'device': str(accelerator.device),
                 'time_gap_sec': args.psi_time_gap_sec,
                 'mask_ratio': args.psi_mask_ratio,
                 'temperature': args.psi_temperature,
