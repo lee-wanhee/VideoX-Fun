@@ -46,6 +46,8 @@ from .wan_vae3_8 import AutoencoderKLWan2_2_, AutoencoderKLWan3_8
 from .z_image_transformer2d import ZImageTransformer2DModel
 from .z_image_transformer2d_control import ZImageControlTransformer2DModel
 
+from .psi_projection import PSIProjectionSwiGLU
+
 # The pai_fuser is an internally developed acceleration package, which can be used on PAI.
 if importlib.util.find_spec("paifuser") is not None:
     # --------------------------------------------------------------- #
