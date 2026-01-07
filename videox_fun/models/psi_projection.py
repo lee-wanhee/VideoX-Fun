@@ -25,15 +25,15 @@ class ChannelRMSNorm2d(nn.Module):
         return x
 
 class PSIProjectionSwiGLU(nn.Module):
-    def __init__(self, n_input_channels, hidden_channels, n_output_channels, pdrop=0.0, eps=1e-6):
+    def __init__(self, n_input_channels, n_hidden_channels, n_output_channels, pdrop=0.0, eps=1e-6):
         super().__init__()
 
         # pre-norm on input channels
         self.norm = ChannelRMSNorm2d(n_input_channels, eps=eps, scale=True)
         # up-proj: Cin -> 2*H (value, gate)
-        self.proj_up = nn.Conv2d(n_input_channels, 2 * hidden_channels, kernel_size=1)
+        self.proj_up = nn.Conv2d(n_input_channels, 2 * n_hidden_channels, kernel_size=1)
         # down-proj: H -> Cout
-        self.proj_down = nn.Conv2d(hidden_channels, n_output_channels, kernel_size=1)
+        self.proj_down = nn.Conv2d(n_hidden_channels, n_output_channels, kernel_size=1)
         self.act = nn.SiLU()
         self.drop = nn.Dropout(pdrop)
 
