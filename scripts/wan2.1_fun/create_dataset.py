@@ -183,11 +183,11 @@ Use this in your training script:
     if rejected and len(rejected) <= 10:
         print("Rejected videos (too short):")
         for path, count in rejected:
-            print(f"  {path.name}: {count} frames (need {min_frames})")
+            print(f"  {Path(path).name}: {count} frames (need {min_frames})")
     elif rejected:
         print(f"Sample of rejected videos (showing 5 of {len(rejected)}):")
         for path, count in rejected[:5]:
-            print(f"  {path.name}: {count} frames (need {min_frames})")
+            print(f"  {Path(path).name}: {count} frames (need {min_frames})")
     
     return output_csv
 
