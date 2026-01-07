@@ -1913,21 +1913,28 @@ def main():
                     
                     # 5. Add PSI features to VAE latent (broadcast over time)
                     psi_projected = psi_projected.unsqueeze(2)  # (B, 16, 1, H', W')
-                    control_latents = control_latents_base + psi_projected  # (B, 16, 1, H', W')
+                    psi_control_latents = control_latents_base + psi_projected  # (B, 16, 1, H', W')
                     
                     # 6. Repeat to match video length (num_frames)
                     num_frames = latents.shape[2]
-                    control_latents = control_latents.repeat(1, 1, num_frames, 1, 1)  # (B, 16, T, H', W')
+                    psi_control_latents = psi_control_latents.repeat(1, 1, num_frames, 1, 1)  # (B, 16, T, H', W')
                     
-                    # 7. Make control latents to zero (with probability) - for classifier-free guidance
-                    for bs_index in range(control_latents.size()[0]):
+                    # 7. Make PSI control latents to zero (with probability) - for classifier-free guidance
+                    for bs_index in range(psi_control_latents.size()[0]):
                         if rng is None:
                             zero_init_control_latents_conv_in = np.random.choice([0, 1], p = [0.90, 0.10])
                         else:
                             zero_init_control_latents_conv_in = rng.choice([0, 1], p = [0.90, 0.10])
 
                         if zero_init_control_latents_conv_in:
-                            control_latents[bs_index] = control_latents[bs_index] * 0
+                            psi_control_latents[bs_index] = psi_control_latents[bs_index] * 0
+                    
+                    # 8. Combine PSI control with existing control_latents (ref_latents if present)
+                    # This maintains the same channel structure as non-PSI: [control, ref]
+                    if control_latents is None:
+                        control_latents = psi_control_latents
+                    else:
+                        control_latents = torch.cat([psi_control_latents, control_latents], dim=1)
 
                 if args.enable_text_encoder_in_dataloader:
                     prompt_embeds = batch['encoder_hidden_states'].to(device=latents.device)
