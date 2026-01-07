@@ -17,39 +17,41 @@ import argparse
 from pathlib import Path
 from tqdm import tqdm
 import multiprocessing as mp
-from functools import partial
-
-try:
-    from decord import VideoReader, cpu
-    DECORD_AVAILABLE = True
-except ImportError:
-    DECORD_AVAILABLE = False
-    import cv2
 
 
 def get_frame_count(video_path):
     """Get the total number of frames in a video."""
+    # Import inside function to work properly with multiprocessing spawn
+    try:
+        from decord import VideoReader, cpu
+        decord_available = True
+    except ImportError:
+        decord_available = False
+    
+    video_path = str(video_path)  # Ensure string path
     if not os.path.exists(video_path):
         return -1
     try:
-        if DECORD_AVAILABLE:
+        if decord_available:
             vr = VideoReader(video_path, ctx=cpu(0), num_threads=1)
             return len(vr)
         else:
+            import cv2
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
                 return -1
             count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             cap.release()
             return count
-    except:
+    except Exception as e:
         return -1
 
 
-def process_video(video_path, min_frames):
+def process_video(args):
     """Check if a video has enough frames."""
+    video_path, min_frames = args
     frame_count = get_frame_count(video_path)
-    return video_path, frame_count, frame_count >= min_frames
+    return str(video_path), frame_count, frame_count >= min_frames
 
 
 def create_dataset(
@@ -107,11 +109,11 @@ Workers:          {workers}
 ================================================================================
 """)
     
-    # Find all videos
+    # Find all videos (recursively search subdirectories)
     video_files = []
     for ext in extensions:
-        video_files.extend(video_dir.glob(f'*{ext}'))
-        video_files.extend(video_dir.glob(f'*{ext.upper()}'))
+        video_files.extend(video_dir.rglob(f'*{ext}'))
+        video_files.extend(video_dir.rglob(f'*{ext.upper()}'))
     video_files = sorted(set(video_files))
     
     print(f"Found {len(video_files)} video files")
@@ -124,17 +126,20 @@ Workers:          {workers}
     # Check frame counts in parallel
     print(f"\nChecking frame counts (min required: {min_frames})...")
     
-    process_fn = partial(process_video, min_frames=min_frames)
+    # Prepare args as tuples for multiprocessing
+    video_args = [(str(v), min_frames) for v in video_files]
     
     if workers > 1:
-        with mp.Pool(workers) as pool:
+        # Use spawn context for compatibility with decord
+        ctx = mp.get_context('spawn')
+        with ctx.Pool(workers) as pool:
             results = list(tqdm(
-                pool.imap(process_fn, video_files),
+                pool.imap(process_video, video_args),
                 total=len(video_files),
                 desc="Scanning videos"
             ))
     else:
-        results = [process_fn(v) for v in tqdm(video_files, desc="Scanning videos")]
+        results = [process_video(args) for args in tqdm(video_args, desc="Scanning videos")]
     
     # Filter results
     kept = [(path, count) for path, count, ok in results if ok]
