@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=112
 #SBATCH --mem=1000GB
 #SBATCH --time=48:00:00
-#SBATCH --output=logs/train_psi_%j.out
-#SBATCH --error=logs/train_psi_%j.err
+#SBATCH --output=/scratch/m000063/users/wanhee/VideoX-Fun/logs/train_psi_%j.out
+#SBATCH --error=/scratch/m000063/users/wanhee/VideoX-Fun/logs/train_psi_%j.err
 
 # Load required modules
 module load slurm
@@ -24,7 +24,7 @@ conda activate videox-fun
 cd /scratch/m000063/users/wanhee/VideoX-Fun
 
 # Create logs directory if it doesn't exist
-mkdir -p logs
+mkdir -p /scratch/m000063/users/wanhee/VideoX-Fun/logs
 
 # Model and data paths
 export MODEL_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/models/Wan2.1-Fun-1.3B-Control"
