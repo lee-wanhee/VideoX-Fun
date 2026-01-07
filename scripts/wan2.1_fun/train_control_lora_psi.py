@@ -1008,9 +1008,6 @@ def main():
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
 
-        accelerator.register_save_state_pre_hook(save_model_hook)
-        accelerator.register_load_state_pre_hook(load_model_hook)
-
     if args.gradient_checkpointing:
         transformer3d.enable_gradient_checkpointing()
 
@@ -1049,15 +1046,17 @@ def main():
     if args.use_peft_lora:
         logging.info("Add peft parameters")
         trainable_params = list(filter(lambda p: p.requires_grad, transformer3d.parameters()))
-        trainable_params.extend(list(filter(lambda p: p.requires_grad, psi_projection.parameters())))
         trainable_params_optim = list(filter(lambda p: p.requires_grad, transformer3d.parameters()))
-        trainable_params_optim.extend(list(filter(lambda p: p.requires_grad, psi_projection.parameters())))
+        if args.enable_psi_control:
+            trainable_params.extend(list(filter(lambda p: p.requires_grad, psi_projection.parameters())))
+            trainable_params_optim.extend(list(filter(lambda p: p.requires_grad, psi_projection.parameters())))
     else:
         logging.info("Add network parameters")  
         trainable_params = list(filter(lambda p: p.requires_grad, network.parameters()))
-        trainable_params.extend(list(filter(lambda p: p.requires_grad, psi_projection.parameters())))
         trainable_params_optim = network.prepare_optimizer_params(args.learning_rate / 2, args.learning_rate, args.learning_rate)
-        trainable_params_optim.extend(list(filter(lambda p: p.requires_grad, psi_projection.parameters())))
+        if args.enable_psi_control:
+            trainable_params.extend(list(filter(lambda p: p.requires_grad, psi_projection.parameters())))
+            trainable_params_optim.extend(list(filter(lambda p: p.requires_grad, psi_projection.parameters())))
 
     if args.use_came:
         optimizer = optimizer_cls(
@@ -1433,19 +1432,34 @@ def main():
 
     # Prepare everything with our `accelerator`.
     if args.use_peft_lora:
-        transformer3d, psi_projection, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            transformer3d, psi_projection, optimizer, train_dataloader, lr_scheduler
-        )
+        if args.enable_psi_control:
+            transformer3d, psi_projection, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                transformer3d, psi_projection, optimizer, train_dataloader, lr_scheduler
+            )
+        else:
+            transformer3d, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                transformer3d, optimizer, train_dataloader, lr_scheduler
+            )
     elif fsdp_stage != 0:
         transformer3d.network = network
         transformer3d = transformer3d.to(dtype=weight_dtype)
-        transformer3d, psi_projection, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            transformer3d, psi_projection, optimizer, train_dataloader, lr_scheduler
-        )
+        if args.enable_psi_control:
+            transformer3d, psi_projection, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                transformer3d, psi_projection, optimizer, train_dataloader, lr_scheduler
+            )
+        else:
+            transformer3d, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                transformer3d, optimizer, train_dataloader, lr_scheduler
+            )
     else:
-        network, psi_projection, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            network, psi_projection, optimizer, train_dataloader, lr_scheduler
-        )
+        if args.enable_psi_control:
+            network, psi_projection, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                network, psi_projection, optimizer, train_dataloader, lr_scheduler
+            )
+        else:
+            network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                network, optimizer, train_dataloader, lr_scheduler
+            )
 
     if zero_stage != 0 and not args.use_peft_lora:
         from functools import partial
@@ -1761,6 +1775,10 @@ def main():
                     clip_image_encoder.to(accelerator.device)
                     if not args.enable_text_encoder_in_dataloader:
                         text_encoder.to("cpu")
+
+                # Initialize variables that may not be set depending on train_mode
+                clip_context = None
+                full_ref = None
 
                 with torch.no_grad():
                     # This way is quicker when batch grows up
