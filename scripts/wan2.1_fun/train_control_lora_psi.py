@@ -819,9 +819,14 @@ def main():
         clip_image_encoder = clip_image_encoder.eval()
         # Get PSI Control Feature Extractor
         if args.enable_psi_control:
-            psi_control_extractor = PSIControlFeatureExtractor.from_pretrained(
-                os.path.join(args.pretrained_model_name_or_path, config['psi_control_extractor_kwargs'].get('psi_control_extractor_subpath', 'psi_control_extractor')),
-            )
+            psi_control_extractor_config = {
+                'model_name': "PSI_7B_RGBCDF_bvd_4frame_Unified_Vocab_Balanced_Task_V2_continue_ctx_8192/model_01400000.pt",
+                'quantizer_name': "PLPQ-ImageNetOpenImages-wavelet-small-bs512-lr1e-4-l1-dinov21e0224-coarsel11e-2/model_best.pt",
+                'flow_quantizer_name': "HLQ-flow-nq2-gen2_0-wavelet-small-bs512-lr1e-4-l2-coarsel21e-2-fg_v1_5/model_best.pt",
+                'depth_quantizer_name': "HLQ-depth-nq2-gen2_0-wavelet-small-bs512-lr1e-4-l1-dinov21e0224-coarsel11e-2-200k_ft500k_3/model_best.pt",
+                'spatial_compression': 8,
+            }
+            psi_control_extractor = PSIControlFeatureExtractor.from_pretrained(psi_control_extractor_config)
             psi_control_extractor = psi_control_extractor.eval()
         else:
             psi_control_extractor = None
