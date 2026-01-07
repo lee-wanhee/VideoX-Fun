@@ -1813,6 +1813,7 @@ def main():
                             decoded_frames_5d = decoded_frames.unsqueeze(1)  # (B, 1, C, H, W)
                             control_latents_base = _batch_encode_vae(decoded_frames_5d)  # (B, C_latent, 1, H', W')
                             # control_latents will be created after PSI projection (outside no_grad)
+                            control_latents = None  # Initialize here, will be set after PSI projection
                         else:
                             control_latents = _batch_encode_vae(control_pixel_values)
                             # Make control latents to zero (with probability) - only for non-PSI mode
