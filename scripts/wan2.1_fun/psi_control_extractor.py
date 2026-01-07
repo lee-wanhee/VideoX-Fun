@@ -366,8 +366,8 @@ class PSIControlFeatureExtractor(nn.Module):
         print(f"[PSI] Output semantic_features: {semantic_features.shape}")
         
         return {
-            'decoded_frames': decoded_frames,
-            'semantic_features': semantic_features,
+            'decoded_frames': decoded_frames, # (B, 3, H, W)
+            'semantic_features': semantic_features, # (B, 8192, 32, 32)
         }
     
     @classmethod

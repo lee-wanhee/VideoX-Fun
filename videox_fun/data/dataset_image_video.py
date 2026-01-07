@@ -276,6 +276,7 @@ class ImageVideoControlDataset(Dataset):
         return_file_name=False,
         enable_subject_info=False,
         padding_subject_info=True,
+        enable_psi_control=False,
     ):
         # Loading annotations from files
         print(f"loading annotations from {ann_path} ...")
@@ -311,6 +312,7 @@ class ImageVideoControlDataset(Dataset):
         self.enable_camera_info = enable_camera_info
         self.enable_subject_info = enable_subject_info
         self.padding_subject_info = padding_subject_info
+        self.enable_psi_control = enable_psi_control
 
         self.video_length_drop_start = video_length_drop_start
         self.video_length_drop_end = video_length_drop_end
@@ -398,71 +400,113 @@ class ImageVideoControlDataset(Dataset):
                 if random.random() < self.text_drop_ratio:
                     text = ''
 
-            control_video_id = data_info['control_file_path']
-            
-            if control_video_id is not None:
-                if self.data_root is None:
-                    control_video_id = control_video_id
-                else:
-                    control_video_id = os.path.join(self.data_root, control_video_id)
+            # PSI control: create 2-frame control from original video (first frame + 0.5s later)
+            if self.enable_psi_control:
+                with VideoReader_contextmanager(video_dir, num_threads=2) as control_video_reader:
+                    try:
+                        # Get video fps to calculate 0.5s offset
+                        fps = control_video_reader.get_avg_fps()
+                        frame_offset = int(0.5 * fps)  # 0.5 seconds in frames
+                        
+                        # First frame: same as first sampled frame
+                        first_frame_idx = batch_index[0]
+                        # Second frame: 0.5 seconds later, clamped to video length
+                        second_frame_idx = min(first_frame_idx + frame_offset, len(control_video_reader) - 1)
+                        
+                        psi_indices = [first_frame_idx, second_frame_idx]
+                        
+                        sample_args = (control_video_reader, psi_indices)
+                        psi_frames = func_timeout(
+                            VIDEO_READER_TIMEOUT, get_video_reader_batch, args=sample_args
+                        )
+                        
+                        # Resize frames
+                        resized_frames = []
+                        for frame in psi_frames:
+                            resized_frame = resize_frame(frame, self.larger_side_of_image_and_video)
+                            resized_frames.append(resized_frame)
+                        control_pixel_values = np.array(resized_frames)
+                        
+                    except FunctionTimedOut:
+                        raise ValueError(f"Read PSI control {idx} timeout.")
+                    except Exception as e:
+                        raise ValueError(f"Failed to extract PSI control frames. Error is {e}.")
+                    
+                    if not self.enable_bucket:
+                        control_pixel_values = torch.from_numpy(control_pixel_values).permute(0, 3, 1, 2).contiguous()
+                        control_pixel_values = control_pixel_values / 255.
+                        del control_video_reader
+                    
+                    if not self.enable_bucket:
+                        control_pixel_values = self.video_transforms(control_pixel_values)
                 
-            if self.enable_camera_info:
-                if control_video_id.lower().endswith('.txt'):
-                    if not self.enable_bucket:
-                        control_pixel_values = torch.zeros_like(pixel_values)
-
-                        control_camera_values = process_pose_file(control_video_id, width=self.video_sample_size[1], height=self.video_sample_size[0])
-                        control_camera_values = torch.from_numpy(control_camera_values).permute(0, 3, 1, 2).contiguous()
-                        control_camera_values = F.interpolate(control_camera_values, size=(len(video_reader), control_camera_values.size(3)), mode='bilinear', align_corners=True)
-                        control_camera_values = self.video_transforms_camera(control_camera_values)
-                    else:
-                        control_pixel_values = np.zeros_like(pixel_values)
-
-                        control_camera_values = process_pose_file(control_video_id, width=self.video_sample_size[1], height=self.video_sample_size[0], return_poses=True)
-                        control_camera_values = torch.from_numpy(np.array(control_camera_values)).unsqueeze(0).unsqueeze(0)
-                        control_camera_values = F.interpolate(control_camera_values, size=(len(video_reader), control_camera_values.size(3)), mode='bilinear', align_corners=True)[0][0]
-                        control_camera_values = np.array([control_camera_values[index] for index in batch_index])
-                else:
-                    if not self.enable_bucket:
-                        control_pixel_values = torch.zeros_like(pixel_values)
-                        control_camera_values = None
-                    else:
-                        control_pixel_values = np.zeros_like(pixel_values)
-                        control_camera_values = None
-            else:
-                if control_video_id is not None:
-                    with VideoReader_contextmanager(control_video_id, num_threads=2) as control_video_reader:
-                        try:
-                            sample_args = (control_video_reader, batch_index)
-                            control_pixel_values = func_timeout(
-                                VIDEO_READER_TIMEOUT, get_video_reader_batch, args=sample_args
-                            )
-                            resized_frames = []
-                            for i in range(len(control_pixel_values)):
-                                frame = control_pixel_values[i]
-                                resized_frame = resize_frame(frame, self.larger_side_of_image_and_video)
-                                resized_frames.append(resized_frame)
-                            control_pixel_values = np.array(resized_frames)
-                        except FunctionTimedOut:
-                            raise ValueError(f"Read {idx} timeout.")
-                        except Exception as e:
-                            raise ValueError(f"Failed to extract frames from video. Error is {e}.")
-
-                        if not self.enable_bucket:
-                            control_pixel_values = torch.from_numpy(control_pixel_values).permute(0, 3, 1, 2).contiguous()
-                            control_pixel_values = control_pixel_values / 255.
-                            del control_video_reader
-                        else:
-                            control_pixel_values = control_pixel_values
-
-                        if not self.enable_bucket:
-                            control_pixel_values = self.video_transforms(control_pixel_values)
-                else:
-                    if not self.enable_bucket:
-                        control_pixel_values = torch.zeros_like(pixel_values)
-                    else:
-                        control_pixel_values = np.zeros_like(pixel_values)
                 control_camera_values = None
+            else:
+                control_video_id = data_info['control_file_path']
+                
+                if control_video_id is not None:
+                    if self.data_root is None:
+                        control_video_id = control_video_id
+                    else:
+                        control_video_id = os.path.join(self.data_root, control_video_id)
+                    
+                if self.enable_camera_info:
+                    if control_video_id.lower().endswith('.txt'):
+                        if not self.enable_bucket:
+                            control_pixel_values = torch.zeros_like(pixel_values)
+
+                            control_camera_values = process_pose_file(control_video_id, width=self.video_sample_size[1], height=self.video_sample_size[0])
+                            control_camera_values = torch.from_numpy(control_camera_values).permute(0, 3, 1, 2).contiguous()
+                            control_camera_values = F.interpolate(control_camera_values, size=(len(video_reader), control_camera_values.size(3)), mode='bilinear', align_corners=True)
+                            control_camera_values = self.video_transforms_camera(control_camera_values)
+                        else:
+                            control_pixel_values = np.zeros_like(pixel_values)
+
+                            control_camera_values = process_pose_file(control_video_id, width=self.video_sample_size[1], height=self.video_sample_size[0], return_poses=True)
+                            control_camera_values = torch.from_numpy(np.array(control_camera_values)).unsqueeze(0).unsqueeze(0)
+                            control_camera_values = F.interpolate(control_camera_values, size=(len(video_reader), control_camera_values.size(3)), mode='bilinear', align_corners=True)[0][0]
+                            control_camera_values = np.array([control_camera_values[index] for index in batch_index])
+                    else:
+                        if not self.enable_bucket:
+                            control_pixel_values = torch.zeros_like(pixel_values)
+                            control_camera_values = None
+                        else:
+                            control_pixel_values = np.zeros_like(pixel_values)
+                            control_camera_values = None
+                else:
+                    if control_video_id is not None:
+                        with VideoReader_contextmanager(control_video_id, num_threads=2) as control_video_reader:
+                            try:
+                                sample_args = (control_video_reader, batch_index)
+                                control_pixel_values = func_timeout(
+                                    VIDEO_READER_TIMEOUT, get_video_reader_batch, args=sample_args
+                                )
+                                resized_frames = []
+                                for i in range(len(control_pixel_values)):
+                                    frame = control_pixel_values[i]
+                                    resized_frame = resize_frame(frame, self.larger_side_of_image_and_video)
+                                    resized_frames.append(resized_frame)
+                                control_pixel_values = np.array(resized_frames)
+                            except FunctionTimedOut:
+                                raise ValueError(f"Read {idx} timeout.")
+                            except Exception as e:
+                                raise ValueError(f"Failed to extract frames from video. Error is {e}.")
+
+                            if not self.enable_bucket:
+                                control_pixel_values = torch.from_numpy(control_pixel_values).permute(0, 3, 1, 2).contiguous()
+                                control_pixel_values = control_pixel_values / 255.
+                                del control_video_reader
+                            else:
+                                control_pixel_values = control_pixel_values
+
+                            if not self.enable_bucket:
+                                control_pixel_values = self.video_transforms(control_pixel_values)
+                    else:
+                        if not self.enable_bucket:
+                            control_pixel_values = torch.zeros_like(pixel_values)
+                        else:
+                            control_pixel_values = np.zeros_like(pixel_values)
+                    control_camera_values = None
             
             if self.enable_subject_info:
                 if not self.enable_bucket:
