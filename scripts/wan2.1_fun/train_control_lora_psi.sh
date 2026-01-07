@@ -1,4 +1,4 @@
-export MODEL_NAME="models/Diffusion_Transformer/Wan2.1-Fun-V1.1-14B-Control"
+export MODEL_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/models/Wan2.1-Fun-1.3B-Control"
 export DATASET_NAME="/scratch/m000063/data/bvd2/kinetics700"
 export DATASET_META_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/kinetics700_49f.csv"
 # NCCL_IB_DISABLE=1 and NCCL_P2P_DISABLE=1 are used in multi nodes without RDMA. 
@@ -40,5 +40,4 @@ accelerate launch --mixed_precision="bf16" scripts/wan2.1_fun/train_control_lora
   --network_alpha=32 \
   --target_name="q,k,v,ffn.0,ffn.2" \
   --use_peft_lora \
-  --low_vram \
   --enable_psi_control
