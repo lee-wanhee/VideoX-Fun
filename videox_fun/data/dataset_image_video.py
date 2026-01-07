@@ -613,12 +613,13 @@ class ImageVideoControlDataset(Dataset):
 
                 sample["pixel_values"] = pixel_values
                 sample["control_pixel_values"] = control_pixel_values
-                sample["subject_image"] = subject_image
+                if subject_image is not None:
+                    sample["subject_image"] = subject_image
                 sample["text"] = name
                 sample["data_type"] = data_type
                 sample["idx"] = idx
 
-                if self.enable_camera_info:
+                if self.enable_camera_info and control_camera_values is not None:
                     sample["control_camera_values"] = control_camera_values
 
                 if len(sample) > 0:
