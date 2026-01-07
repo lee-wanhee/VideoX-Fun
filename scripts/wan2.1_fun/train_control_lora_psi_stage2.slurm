@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train_psi_control
+#SBATCH --job-name=train_psi_stage2
 #SBATCH --partition=batch
 #SBATCH --account=marlowe-m000063-pm01
 #SBATCH --nodes=4
@@ -7,20 +7,19 @@
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=112
 #SBATCH --mem=1000GB
-#SBATCH --time=48:00:00
-#SBATCH --output=/scratch/m000063/users/wanhee/VideoX-Fun/logs/train_psi_%j.out
-#SBATCH --error=/scratch/m000063/users/wanhee/VideoX-Fun/logs/train_psi_%j.err
+#SBATCH --time=12:00:00
+#SBATCH --output=/scratch/m000063/users/wanhee/VideoX-Fun/logs/train_psi_stage2_%j.out
+#SBATCH --error=/scratch/m000063/users/wanhee/VideoX-Fun/logs/train_psi_stage2_%j.err
 
 # ==============================================================================
-# Training Configuration (based on paper settings)
+# Stage 2: Fine-tuning on cleaner synthetic data
 # ==============================================================================
-# Paper: "batch size 128 with learning rates of 1×10−5 and 1×10−6 for stages 1 and 2"
-# Stage 1: 4.8K steps on OpenVid-1M (filtered 0.6M videos)
-# Stage 2: 800 steps on cleaner synthetic data (Wan 2.1)
+# Paper: "fine-tuning on cleaner synthetic data for 800 steps (Wan 2.1)"
+# Learning rate: 1e-6 (10× lower than Stage 1)
+# Max steps: 800 (approximately one epoch)
 #
 # With 4 nodes × 8 GPUs = 32 GPUs total
-# Effective batch size = train_batch_size × gradient_accumulation_steps × num_gpus
-# 128 = 1 × 4 × 32
+# Effective batch size = 1 × 4 × 32 = 128
 # ==============================================================================
 
 # Load required modules
@@ -38,13 +37,18 @@ cd /scratch/m000063/users/wanhee/VideoX-Fun
 # Create logs directory if it doesn't exist
 mkdir -p /scratch/m000063/users/wanhee/VideoX-Fun/logs
 
-# Model and data paths
-export MODEL_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/models/Wan2.1-Fun-1.3B-Control"
-export DATASET_NAME="/scratch/m000063/data/bvd2/kinetics700"
-export DATASET_META_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/kinetics700_49f.csv"
+# ==============================================================================
+# IMPORTANT: Set this to your Stage 1 output directory!
+# ==============================================================================
+export STAGE1_CHECKPOINT="/scratch/m000063/users/wanhee/VideoX-Fun/output_psi_control_YYYYMMDD_HHMMSS"
 
-# Output directory with timestamp
-export OUTPUT_DIR="/scratch/m000063/users/wanhee/VideoX-Fun/output_psi_control_$(date +%Y%m%d_%H%M%S)"
+# Model and data paths (use cleaner/synthetic data for Stage 2)
+export MODEL_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/models/Wan2.1-Fun-1.3B-Control"
+export DATASET_NAME="/scratch/m000063/data/bvd2/kinetics700"  # TODO: Replace with cleaner synthetic data
+export DATASET_META_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/kinetics700_49f.csv"  # TODO: Replace with cleaner data meta
+
+# Output directory for Stage 2
+export OUTPUT_DIR="/scratch/m000063/users/wanhee/VideoX-Fun/output_psi_control_stage2_$(date +%Y%m%d_%H%M%S)"
 
 # NCCL settings for multi-node
 export NCCL_DEBUG=INFO
@@ -61,16 +65,17 @@ GPUS_PER_NODE=8
 WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 
 echo "=============================================="
-echo "Training Configuration:"
+echo "Stage 2: Fine-tuning Configuration"
 echo "=============================================="
 echo "MASTER_ADDR: $MASTER_ADDR"
 echo "MASTER_PORT: $MASTER_PORT"
 echo "WORLD_SIZE: $WORLD_SIZE (4 nodes × 8 GPUs)"
 echo "NNODES: $NNODES"
 echo "Effective batch size: 128 (1 × 4 grad_accum × 32 GPUs)"
-echo "Learning rate: 1e-5 (Stage 1)"
-echo "Max steps: 4800 (Stage 1)"
-echo "Checkpointing: every 1000 steps (~3 hours)"
+echo "Learning rate: 1e-6 (Stage 2 - 10× lower)"
+echo "Max steps: 800 (Stage 2)"
+echo "Checkpointing: every 200 steps"
+echo "Stage 1 checkpoint: $STAGE1_CHECKPOINT"
 echo "Output dir: $OUTPUT_DIR"
 echo "=============================================="
 
@@ -103,9 +108,9 @@ srun --jobid=$SLURM_JOB_ID bash -c '
         --video_repeat=1 \
         --gradient_accumulation_steps=4 \
         --dataloader_num_workers=8 \
-        --max_train_steps=5001 \
-        --checkpointing_steps=1000 \
-        --learning_rate=1e-05 \
+        --max_train_steps=800 \
+        --checkpointing_steps=200 \
+        --learning_rate=1e-06 \
         --seed=42 \
         --output_dir='$OUTPUT_DIR' \
         --gradient_checkpointing \
@@ -125,5 +130,6 @@ srun --jobid=$SLURM_JOB_ID bash -c '
         --target_name="q,k,v,ffn.0,ffn.2" \
         --use_peft_lora \
         --enable_psi_control \
-        --resume_from_checkpoint="latest"
+        --resume_from_checkpoint='$STAGE1_CHECKPOINT'
 '
+
