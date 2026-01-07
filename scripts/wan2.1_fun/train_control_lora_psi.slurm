@@ -74,6 +74,7 @@ srun --jobid=$SLURM_JOB_ID bash -c '
         --image_sample_size=512 \
         --video_sample_size=512 \
         --token_sample_size=512 \
+        --fix_sample_size 512 512 \
         --video_sample_stride=2 \
         --video_sample_n_frames=49 \
         --train_batch_size=1 \
@@ -93,6 +94,7 @@ srun --jobid=$SLURM_JOB_ID bash -c '
         --max_grad_norm=0.05 \
         --training_with_video_token_length \
         --uniform_sampling \
+        --enable_bucket \
         --train_mode="control_ref" \
         --control_ref_image="random" \
         --add_full_ref_image_in_self_attention \
