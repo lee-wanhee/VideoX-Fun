@@ -128,3 +128,5 @@ srun --jobid=$SLURM_JOB_ID bash -c '
         --enable_psi_control \
         --resume_from_checkpoint="latest"
 '
+
+# started the first training at 10pm on 2026-01-07
