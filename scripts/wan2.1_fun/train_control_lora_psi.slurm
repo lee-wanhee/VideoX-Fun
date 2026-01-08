@@ -77,7 +77,7 @@ echo "=============================================="
 
 # Run with srun + accelerate
 srun --jobid=$SLURM_JOB_ID bash -c '
-    source ~/.bashrc
+    source /scratch/m000063/users/wanhee/miniconda3/etc/profile.d/conda.sh
     conda activate videox-fun
     cd /scratch/m000063/users/wanhee/VideoX-Fun
     export NODE_RANK=$SLURM_NODEID
