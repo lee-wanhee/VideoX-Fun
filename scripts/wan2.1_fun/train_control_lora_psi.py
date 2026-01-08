@@ -115,7 +115,7 @@ check_min_version("0.18.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
-def log_validation(vae, text_encoder, tokenizer, clip_image_encoder, transformer3d, network, config, args, accelerator, weight_dtype, global_step):
+def log_validation(vae, text_encoder, tokenizer, clip_image_encoder, transformer3d, network, config, args, accelerator, weight_dtype, global_step, psi_control_extractor=None, psi_projection=None):
     try:
         logger.info("Running validation... ")
 
@@ -128,6 +128,13 @@ def log_validation(vae, text_encoder, tokenizer, clip_image_encoder, transformer
             **filter_kwargs(FlowMatchEulerDiscreteScheduler, OmegaConf.to_container(config['scheduler_kwargs']))
         )
 
+        # Prepare PSI models if enabled
+        psi_extractor_for_pipeline = None
+        psi_proj_for_pipeline = None
+        if args.enable_psi_control and psi_control_extractor is not None and psi_projection is not None:
+            psi_extractor_for_pipeline = accelerator.unwrap_model(psi_control_extractor) if hasattr(psi_control_extractor, 'module') else psi_control_extractor
+            psi_proj_for_pipeline = accelerator.unwrap_model(psi_projection)
+
         pipeline = WanFunControlPipeline(
             vae=accelerator.unwrap_model(vae).to(weight_dtype), 
             text_encoder=accelerator.unwrap_model(text_encoder),
@@ -135,6 +142,8 @@ def log_validation(vae, text_encoder, tokenizer, clip_image_encoder, transformer
             transformer=transformer3d_val,
             scheduler=scheduler,
             clip_image_encoder=clip_image_encoder,
+            psi_control_extractor=psi_extractor_for_pipeline,
+            psi_projection=psi_proj_for_pipeline,
         )
         pipeline = pipeline.to(accelerator.device)
 
@@ -153,6 +162,8 @@ def log_validation(vae, text_encoder, tokenizer, clip_image_encoder, transformer
                 with torch.autocast("cuda", dtype=weight_dtype):
                     video_length = int(args.video_sample_n_frames // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.video_sample_n_frames != 1 else 1
                     input_video, input_video_mask, ref_image, clip_image = get_video_to_video_latent(args.validation_paths[i], video_length=video_length, sample_size=[args.video_sample_size, args.video_sample_size])
+                    
+                    # Pipeline will automatically use PSI control if PSI models are provided
                     sample = pipeline(
                         args.validation_prompts[i], 
                         num_frames = video_length,
@@ -160,7 +171,6 @@ def log_validation(vae, text_encoder, tokenizer, clip_image_encoder, transformer
                         height      = args.video_sample_size,
                         width       = args.video_sample_size,
                         generator   = generator, 
-
                         control_video = input_video,
                     ).videos
                     os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
@@ -178,6 +188,8 @@ def log_validation(vae, text_encoder, tokenizer, clip_image_encoder, transformer
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
         print(f"Eval error with info {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def parse_args():
@@ -2126,6 +2138,8 @@ def main():
                             accelerator,
                             weight_dtype,
                             global_step,
+                            psi_control_extractor=psi_control_extractor if args.enable_psi_control else None,
+                            psi_projection=psi_projection if args.enable_psi_control else None,
                         )
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
@@ -2148,6 +2162,8 @@ def main():
                     accelerator,
                     weight_dtype,
                     global_step,
+                    psi_control_extractor=psi_control_extractor if args.enable_psi_control else None,
+                    psi_projection=psi_projection if args.enable_psi_control else None,
                 )
 
     # Create the pipeline using the trained modules and save it.

@@ -157,8 +157,8 @@ class WanFunControlPipeline(DiffusionPipeline):
     library implements for all the pipelines (such as downloading or saving, running on a particular device, etc.)
     """
 
-    _optional_components = []
-    model_cpu_offload_seq = "text_encoder->clip_image_encoder->transformer->vae"
+    _optional_components = ["psi_control_extractor", "psi_projection"]
+    model_cpu_offload_seq = "text_encoder->clip_image_encoder->psi_control_extractor->psi_projection->transformer->vae"
 
     _callback_tensor_inputs = [
         "latents",
@@ -174,11 +174,15 @@ class WanFunControlPipeline(DiffusionPipeline):
         transformer: WanTransformer3DModel,
         clip_image_encoder: CLIPModel,
         scheduler: FlowMatchEulerDiscreteScheduler,
+        psi_control_extractor=None,
+        psi_projection=None,
     ):
         super().__init__()
 
         self.register_modules(
-            tokenizer=tokenizer, text_encoder=text_encoder, vae=vae, transformer=transformer, clip_image_encoder=clip_image_encoder, scheduler=scheduler
+            tokenizer=tokenizer, text_encoder=text_encoder, vae=vae, transformer=transformer, 
+            clip_image_encoder=clip_image_encoder, scheduler=scheduler,
+            psi_control_extractor=psi_control_extractor, psi_projection=psi_projection,
         )
 
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae.spatial_compression_ratio)
@@ -475,6 +479,7 @@ class WanFunControlPipeline(DiffusionPipeline):
         width: int = 720,
         control_video: Union[torch.FloatTensor] = None,
         control_camera_video: Union[torch.FloatTensor] = None,
+        psi_control_latents: Union[torch.FloatTensor] = None,
         start_image: Union[torch.FloatTensor] = None,
         ref_image: Union[torch.FloatTensor] = None,
         num_frames: int = 49,
@@ -610,6 +615,54 @@ class WanFunControlPipeline(DiffusionPipeline):
             b, f, c, h, w = control_camera_latents.shape
             control_camera_latents = control_camera_latents.contiguous().view(b, f // 4, 4, c, h, w).transpose(2, 3)
             control_camera_latents = control_camera_latents.contiguous().view(b, f // 4, c * 4, h, w).transpose(1, 2)
+            control_video_latents = None
+        elif psi_control_latents is not None:
+            # Use pre-computed PSI control latents directly
+            control_video_latents = psi_control_latents.to(device, weight_dtype)
+            control_camera_latents = None
+        elif control_video is not None and self.psi_control_extractor is not None and self.psi_projection is not None:
+            # PSI Control: Extract features from control video using PSI models
+            video_length = control_video.shape[2]
+            
+            # Preprocess control video for PSI: (B, C, F, H, W) -> (B, F, C, H, W)
+            control_video_preprocessed = self.image_processor.preprocess(
+                rearrange(control_video, "b c f h w -> (b f) c h w"), height=height, width=width
+            )
+            control_video_preprocessed = control_video_preprocessed.to(dtype=weight_dtype)
+            control_video_preprocessed = rearrange(control_video_preprocessed, "(b f) c h w -> b f c h w", f=video_length)
+            
+            # Convert from [0, 1] to [-1, 1] for PSI extractor
+            control_pixel_values = control_video_preprocessed * 2.0 - 1.0
+            
+            # 1. Extract PSI features
+            psi_outputs = self.psi_control_extractor(control_pixel_values)
+            decoded_frames = psi_outputs['decoded_frames']  # (B, C, H, W)
+            psi_semantic_features = psi_outputs['semantic_features']  # (B, 8192, 32, 32)
+            
+            # 2. VAE encode decoded frame
+            decoded_frames_for_vae = decoded_frames.unsqueeze(2)  # (B, C, 1, H, W)
+            control_latents_base = self.vae.encode(decoded_frames_for_vae)[0].sample()  # (B, C_latent, 1, H', W')
+            
+            # 3. Project PSI features
+            psi_projected = self.psi_projection(psi_semantic_features)  # (B, 16, 32, 32)
+            
+            # 4. Upsample to match VAE latent spatial size
+            latent_h, latent_w = control_latents_base.shape[-2], control_latents_base.shape[-1]
+            psi_projected = F.interpolate(
+                psi_projected,
+                size=(latent_h, latent_w),
+                mode='bilinear',
+                align_corners=False
+            )  # (B, 16, H', W')
+            
+            # 5. Add PSI features to VAE latent
+            psi_projected = psi_projected.unsqueeze(2)  # (B, 16, 1, H', W')
+            psi_control_latents_computed = control_latents_base + psi_projected  # (B, 16, 1, H', W')
+            
+            # 6. Repeat for num_frames
+            num_latent_frames = (num_frames - 1) // self.vae.config.temporal_compression_ratio + 1
+            control_video_latents = psi_control_latents_computed.repeat(1, 1, num_latent_frames, 1, 1)  # (B, 16, T, H', W')
+            control_camera_latents = None
         elif control_video is not None:
             video_length = control_video.shape[2]
             control_video = self.image_processor.preprocess(rearrange(control_video, "b c f h w -> (b f) c h w"), height=height, width=width) 

@@ -71,6 +71,7 @@ echo "Effective batch size: 128 (1 × 4 grad_accum × 32 GPUs)"
 echo "Learning rate: 1e-5 (Stage 1)"
 echo "Max steps: 4800 (Stage 1)"
 echo "Checkpointing: every 1000 steps (~3 hours)"
+echo "Validation: DISABLED (run separately after training)"
 echo "Output dir: $OUTPUT_DIR"
 echo "=============================================="
 

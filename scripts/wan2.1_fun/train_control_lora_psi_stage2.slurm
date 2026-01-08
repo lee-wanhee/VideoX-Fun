@@ -76,6 +76,7 @@ echo "Learning rate: 1e-6 (Stage 2 - 10× lower)"
 echo "Max steps: 800 (Stage 2)"
 echo "Checkpointing: every 200 steps"
 echo "Stage 1 checkpoint: $STAGE1_CHECKPOINT"
+echo "Validation: DISABLED (run separately after training)"
 echo "Output dir: $OUTPUT_DIR"
 echo "=============================================="
 
