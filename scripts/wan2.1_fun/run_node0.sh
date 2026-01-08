@@ -38,7 +38,7 @@ export MASTER_PORT=45678
 export NODE_RANK=0
 
 NNODES=2
-GPUS_PER_NODE=8
+GPUS_PER_NODE=2
 WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 
 echo "=============================================="
@@ -46,10 +46,10 @@ echo "Training Configuration:"
 echo "=============================================="
 echo "MASTER_ADDR: $MASTER_ADDR"
 echo "MASTER_PORT: $MASTER_PORT"
-echo "WORLD_SIZE: $WORLD_SIZE (2 nodes × 8 GPUs)"
+echo "WORLD_SIZE: $WORLD_SIZE (2 nodes × 2 GPUs)"
 echo "NNODES: $NNODES"
 echo "NODE_RANK: $NODE_RANK"
-echo "Effective batch size: 64 (1 × 4 grad_accum × 16 GPUs)"
+echo "Effective batch size: 16 (1 × 4 grad_accum × 4 GPUs)"
 echo "Learning rate: 1e-5 (Stage 1)"
 echo "Max steps: 5000"
 echo "Checkpointing: every 1000 steps"
