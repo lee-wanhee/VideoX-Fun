@@ -400,18 +400,50 @@ class ImageVideoControlDataset(Dataset):
                 if random.random() < self.text_drop_ratio:
                     text = ''
 
-            # PSI control: create 2-frame control from original video (first frame + 0.5s later)
+            # PSI control: create 2-frame control from original video
+            # First frame: always frame 0 (relative to sampled clip)
+            # Second frame: randomly sampled from (1 + 4*n) to align with VAE latent boundaries
+            #               constrained to 0.2-1.0 seconds from first frame
             if self.enable_psi_control:
                 with VideoReader_contextmanager(video_dir, num_threads=2) as control_video_reader:
                     try:
-                        # Get video fps to calculate 0.5s offset
+                        # Get video fps from metadata
                         fps = control_video_reader.get_avg_fps()
-                        frame_offset = int(0.5 * fps)  # 0.5 seconds in frames
                         
-                        # First frame: same as first sampled frame
+                        # First frame: the first frame of the sampled clip (not necessarily frame 0 of the video file)
                         first_frame_idx = batch_index[0]
-                        # Second frame: 0.5 seconds later, clamped to video length
-                        second_frame_idx = min(first_frame_idx + frame_offset, len(control_video_reader) - 1)
+                        
+                        # Calculate valid second frame indices:
+                        # - Must be (1 + 4*n) relative to first_frame to align with VAE latent boundaries
+                        # - Must be 0.2-1.0 seconds away from first frame
+                        min_offset_frames = int(0.2 * fps)  # 0.2 seconds
+                        max_offset_frames = int(1.0 * fps)  # 1.0 seconds
+                        
+                        # Generate valid offsets: 1+4*n that fall within [min_offset, max_offset]
+                        valid_offsets = []
+                        n = 0
+                        while True:
+                            offset = 1 + 4 * n
+                            if offset > max_offset_frames:
+                                break
+                            if offset >= min_offset_frames:
+                                valid_offsets.append(offset)
+                            n += 1
+                        
+                        # If no valid offsets, fall back to closest valid one
+                        if len(valid_offsets) == 0:
+                            # Use the smallest valid offset (1+4*n >= min_offset)
+                            n = max(0, (min_offset_frames - 1) // 4)
+                            valid_offsets = [1 + 4 * n]
+                        
+                        # Randomly sample from valid offsets
+                        sampled_offset = random.choice(valid_offsets)
+                        
+                        # Calculate second frame index, clamped to video length
+                        second_frame_idx = min(first_frame_idx + sampled_offset, len(control_video_reader) - 1)
+                        
+                        # Compute actual time gap in seconds
+                        time_gap_sec = (second_frame_idx - first_frame_idx) / fps
                         
                         psi_indices = [first_frame_idx, second_frame_idx]
                         
@@ -426,6 +458,15 @@ class ImageVideoControlDataset(Dataset):
                             resized_frame = resize_frame(frame, self.larger_side_of_image_and_video)
                             resized_frames.append(resized_frame)
                         control_pixel_values = np.array(resized_frames)
+                        
+                        # Store PSI control metadata for training
+                        psi_control_meta = {
+                            'first_frame_idx': 0,  # Always 0 in latent space
+                            'second_frame_offset': sampled_offset,  # Offset from first frame
+                            'second_frame_latent_idx': 1 + (sampled_offset - 1) // 4,  # Latent index for second frame
+                            'time_gap_sec': time_gap_sec,
+                            'fps': fps,
+                        }
                         
                     except FunctionTimedOut:
                         raise ValueError(f"Read PSI control {idx} timeout.")
@@ -537,7 +578,9 @@ class ImageVideoControlDataset(Dataset):
             else:
                 subject_image = None
 
-            return pixel_values, control_pixel_values, subject_image, control_camera_values, text, "video"
+            # Include PSI control metadata if PSI control is enabled
+            psi_meta = psi_control_meta if self.enable_psi_control else None
+            return pixel_values, control_pixel_values, subject_image, control_camera_values, text, "video", psi_meta
         else:
             image_path, text = data_info['file_path'], data_info['text']
             if self.data_root is not None:
@@ -593,7 +636,7 @@ class ImageVideoControlDataset(Dataset):
             else:
                 subject_image = None
 
-            return image, control_image, subject_image, None, text, 'image'
+            return image, control_image, subject_image, None, text, 'image', None  # No PSI meta for images
 
     def __len__(self):
         return self.length
@@ -609,7 +652,7 @@ class ImageVideoControlDataset(Dataset):
                 if data_type_local != data_type:
                     raise ValueError("data_type_local != data_type")
 
-                pixel_values, control_pixel_values, subject_image, control_camera_values, name, data_type = self.get_batch(idx)
+                pixel_values, control_pixel_values, subject_image, control_camera_values, name, data_type, psi_control_meta = self.get_batch(idx)
 
                 sample["pixel_values"] = pixel_values
                 sample["control_pixel_values"] = control_pixel_values
@@ -621,6 +664,9 @@ class ImageVideoControlDataset(Dataset):
 
                 if self.enable_camera_info and control_camera_values is not None:
                     sample["control_camera_values"] = control_camera_values
+                
+                if self.enable_psi_control and psi_control_meta is not None:
+                    sample["psi_control_meta"] = psi_control_meta
 
                 if len(sample) > 0:
                     break

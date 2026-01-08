@@ -66,7 +66,13 @@ control_video = "asset/pose.mp4"  # Path to control video (pose/edge/depth)
 ref_image = None  # Path to reference image (optional, for appearance)
 sample_size = [512, 512]  # [height, width]
 video_length = 49
-fps = 16
+output_fps = 16  # Output video fps
+
+# PSI Control settings (matching training)
+# The model was trained with frames sampled at (1+4*n) offsets within 0.2-1.0s
+# For inference, pick a specific offset (e.g., frame 13 at 30fps = 0.43s, latent idx 4)
+psi_control_frame_offset = 13  # Second frame index relative to first frame
+psi_source_fps = 30.0  # FPS of the source control video
 
 # Generation settings
 prompt = "A person dancing gracefully in a garden."
@@ -203,14 +209,27 @@ def main():
         # Adjust video length for VAE temporal compression
         actual_video_length = int((video_length - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if video_length != 1 else 1
 
-        # Load control video
-        input_video, input_video_mask, _, _ = get_video_to_video_latent(
+        # Load control video (full video for extracting 2 frames)
+        full_control_video, _, _, _ = get_video_to_video_latent(
             control_video, 
-            video_length=actual_video_length, 
+            video_length=max(psi_control_frame_offset + 1, actual_video_length),  # Need enough frames
             sample_size=sample_size, 
-            fps=fps, 
+            fps=psi_source_fps,  # Use source video fps 
             ref_image=None
         )
+        
+        # Extract exactly 2 frames for PSI control: frame 0 and frame at offset
+        # full_control_video shape: (B, C, F, H, W)
+        frame_0 = full_control_video[:, :, 0:1, :, :]  # First frame
+        frame_offset = min(psi_control_frame_offset, full_control_video.shape[2] - 1)
+        frame_1 = full_control_video[:, :, frame_offset:frame_offset+1, :, :]  # Second frame
+        psi_control_video = torch.cat([frame_0, frame_1], dim=2)  # (B, C, 2, H, W)
+        
+        # Compute PSI control parameters
+        psi_time_gap_sec = frame_offset / psi_source_fps
+        psi_second_latent_idx = 1 + (frame_offset - 1) // 4 if frame_offset > 0 else 0
+        
+        print(f"PSI Control: frame 0 + frame {frame_offset} (time gap: {psi_time_gap_sec:.3f}s, latent idx: {psi_second_latent_idx})")
 
         # Load reference image for CLIP (optional)
         clip_image = None
@@ -220,7 +239,7 @@ def main():
             ref_image_tensor = get_image_latent(ref_image, sample_size=sample_size)
 
         # Generate video
-        # The pipeline will automatically use PSI control since psi_control_extractor and psi_projection are provided
+        # The pipeline will use PSI control since psi_control_extractor and psi_projection are provided
         sample = pipeline(
             prompt,
             num_frames=actual_video_length,
@@ -230,7 +249,9 @@ def main():
             generator=generator,
             guidance_scale=guidance_scale,
             num_inference_steps=num_inference_steps,
-            control_video=input_video,
+            control_video=psi_control_video,  # 2-frame control video
+            psi_time_gap_sec=psi_time_gap_sec,  # Time gap between frames
+            psi_second_latent_idx=psi_second_latent_idx,  # Latent index for second frame
             ref_image=ref_image_tensor,
             clip_image=clip_image,
         ).videos
@@ -252,7 +273,7 @@ def main():
         print(f"Saved image to: {output_path}")
     else:
         output_path = os.path.join(save_path, f"{prefix}.mp4")
-        save_videos_grid(sample, output_path, fps=fps)
+        save_videos_grid(sample, output_path, fps=output_fps)
         print(f"Saved video to: {output_path}")
 
     print("=" * 60)

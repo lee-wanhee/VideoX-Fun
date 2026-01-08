@@ -480,6 +480,8 @@ class WanFunControlPipeline(DiffusionPipeline):
         control_video: Union[torch.FloatTensor] = None,
         control_camera_video: Union[torch.FloatTensor] = None,
         psi_control_latents: Union[torch.FloatTensor] = None,
+        psi_time_gap_sec: Optional[float] = None,
+        psi_second_latent_idx: Optional[int] = None,
         start_image: Union[torch.FloatTensor] = None,
         ref_image: Union[torch.FloatTensor] = None,
         num_frames: int = 49,
@@ -622,6 +624,8 @@ class WanFunControlPipeline(DiffusionPipeline):
             control_camera_latents = None
         elif control_video is not None and self.psi_control_extractor is not None and self.psi_projection is not None:
             # PSI Control: Extract features from control video using PSI models
+            # Expects exactly 2 frames (frame 0 and sampled second frame)
+            # User must provide psi_time_gap_sec and psi_second_latent_idx for proper conditioning
             video_length = control_video.shape[2]
             
             # Preprocess control video for PSI: (B, C, F, H, W) -> (B, F, C, H, W)
@@ -634,34 +638,78 @@ class WanFunControlPipeline(DiffusionPipeline):
             # Convert from [0, 1] to [-1, 1] for PSI extractor
             control_pixel_values = control_video_preprocessed * 2.0 - 1.0
             
-            # 1. Extract PSI features
-            psi_outputs = self.psi_control_extractor(control_pixel_values)
-            decoded_frames = psi_outputs['decoded_frames']  # (B, C, H, W)
-            psi_semantic_features = psi_outputs['semantic_features']  # (B, 8192, 32, 32)
+            # Ensure we have exactly 2 frames for PSI
+            if video_length != 2:
+                raise ValueError(
+                    f"PSI control expects exactly 2 frames (frame 0 and sampled second frame), got {video_length}. "
+                    "Please provide a 2-frame control video with the corresponding psi_time_gap_sec and psi_second_latent_idx."
+                )
             
-            # 2. VAE encode decoded frame
-            decoded_frames_for_vae = decoded_frames.unsqueeze(2)  # (B, C, 1, H, W)
-            control_latents_base = self.vae.encode(decoded_frames_for_vae)[0].sample()  # (B, C_latent, 1, H', W')
+            # Use provided time gap or default to 0.5s
+            time_gap_sec = psi_time_gap_sec if psi_time_gap_sec is not None else 0.5
             
-            # 3. Project PSI features
-            psi_projected = self.psi_projection(psi_semantic_features)  # (B, 16, 32, 32)
+            # Use provided second latent index or compute from time gap assuming 30fps
+            if psi_second_latent_idx is not None:
+                second_latent_idx = psi_second_latent_idx
+            else:
+                # Default: compute from time_gap assuming 30fps video
+                # time_gap_sec * 30fps = frame offset, then convert to latent index
+                frame_offset = int(time_gap_sec * 30)
+                second_latent_idx = 1 + (frame_offset - 1) // 4 if frame_offset > 0 else 0
+            
+            # 1. Extract PSI features from 2 frames
+            psi_outputs = self.psi_control_extractor(control_pixel_values, time_gap_sec=time_gap_sec)
+            decoded_frames = psi_outputs['decoded_frames']  # (B, 2, C, H, W)
+            psi_semantic_features = psi_outputs['semantic_features']  # (B, 2, 8192, 32, 32)
+            
+            B, num_psi_frames, C, H, W = decoded_frames.shape
+            
+            # 2. VAE encode BOTH decoded frames
+            decoded_frames_flat = decoded_frames.view(B * num_psi_frames, 1, C, H, W).transpose(1, 2)  # (B*2, C, 1, H, W)
+            control_latents_flat = self.vae.encode(decoded_frames_flat.transpose(1, 2))[0].sample()  # (B*2, C_latent, 1, H', W')
+            _, C_latent, _, H_latent, W_latent = control_latents_flat.shape
+            control_latents_base = control_latents_flat.view(B, num_psi_frames, C_latent, H_latent, W_latent)  # (B, 2, C_latent, H', W')
+            
+            # 3. Project PSI features for BOTH frames
+            psi_semantic_flat = psi_semantic_features.view(B * num_psi_frames, -1, 32, 32)
+            psi_projected_flat = self.psi_projection(psi_semantic_flat)  # (B*2, 16, 32, 32)
             
             # 4. Upsample to match VAE latent spatial size
-            latent_h, latent_w = control_latents_base.shape[-2], control_latents_base.shape[-1]
-            psi_projected = F.interpolate(
-                psi_projected,
-                size=(latent_h, latent_w),
+            psi_projected_flat = F.interpolate(
+                psi_projected_flat,
+                size=(H_latent, W_latent),
                 mode='bilinear',
                 align_corners=False
-            )  # (B, 16, H', W')
+            )  # (B*2, 16, H', W')
+            psi_projected = psi_projected_flat.view(B, num_psi_frames, C_latent, H_latent, W_latent)  # (B, 2, 16, H', W')
             
-            # 5. Add PSI features to VAE latent
-            psi_projected = psi_projected.unsqueeze(2)  # (B, 16, 1, H', W')
-            psi_control_latents_computed = control_latents_base + psi_projected  # (B, 16, 1, H', W')
-            
-            # 6. Repeat for num_frames
+            # 5. Build sparse control latents
+            # PSI-controlled frames: VAE + psi_projected
+            # Non-controlled frames: mask_embedding
             num_latent_frames = (num_frames - 1) // self.vae.config.temporal_compression_ratio + 1
-            control_video_latents = psi_control_latents_computed.repeat(1, 1, num_latent_frames, 1, 1)  # (B, 16, T, H', W')
+            
+            # Get mask embedding for non-controlled frames
+            mask_embedding = self.psi_projection.get_mask_embedding((H_latent, W_latent))  # (1, 16, H', W')
+            mask_embedding = mask_embedding.to(device, weight_dtype)
+            
+            # Initialize control latents with mask embedding (all frames start as masked)
+            control_video_latents = mask_embedding.unsqueeze(2).expand(B, -1, num_latent_frames, -1, -1).clone()
+            
+            # Place PSI-controlled frames at correct latent indices
+            for bs_idx in range(B):
+                # Frame 0 is always at latent index 0
+                control_video_latents[bs_idx, :, 0, :, :] = (
+                    control_latents_base[bs_idx, 0, :, :, :] +
+                    psi_projected[bs_idx, 0, :, :, :]
+                )
+                
+                # Second frame at computed latent index
+                second_idx = min(second_latent_idx, num_latent_frames - 1)
+                control_video_latents[bs_idx, :, second_idx, :, :] = (
+                    control_latents_base[bs_idx, 1, :, :, :] +
+                    psi_projected[bs_idx, 1, :, :, :]
+                )
+            
             control_camera_latents = None
         elif control_video is not None:
             video_length = control_video.shape[2]

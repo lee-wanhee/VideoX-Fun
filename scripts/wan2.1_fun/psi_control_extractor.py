@@ -66,7 +66,6 @@ class PSIControlFeatureExtractor(nn.Module):
         top_p: float = 0.9,
         top_k: int = 1000,
         seed: int = 42,
-        time_gap_sec: float = 0.5,  # Time gap between the 2 frames (in seconds)
         **kwargs
     ):
         super().__init__()
@@ -86,7 +85,6 @@ class PSIControlFeatureExtractor(nn.Module):
         self.top_p = top_p
         self.top_k = top_k
         self.seed = seed
-        self.time_gap_sec = time_gap_sec
         
         # Initialize PSIPredictor
         print(f"Initializing PSIPredictor...")
@@ -145,31 +143,36 @@ class PSIControlFeatureExtractor(nn.Module):
         
         return unmask_indices_list
     
-    def forward(self, control_pixel_values, fps=None):
+    def forward(self, control_pixel_values, fps=30.0, time_gap_sec=0.5):
         """
         Extract raw features from input video frames using PSIPredictor.
         
         This is a PURE feature extractor - no learnable parameters, no VAE encoding.
         Returns raw outputs to be processed downstream (VAE encoding + projection).
         
-        Extracts features from only 2 frames spaced time_gap_sec (default 0.5s) apart.
+        Now expects EXACTLY 2 frames (pre-sampled by dataloader) with the actual time gap.
         
         Args:
             control_pixel_values: (B, F, C, H, W) tensor, values in [-1, 1]
                                  B = batch size
-                                 F = number of frames
+                                 F = number of frames (should be 2: frame 0 and sampled second frame)
                                  C = 3 (RGB channels)
                                  H, W = height and width
-            fps: Frames per second of the video (optional, defaults to estimating from num_frames)
+            fps: Frames per second of the video (default: 30.0, for logging)
+            time_gap_sec: Actual time gap between the two frames in seconds (default: 0.5s).
+                         This is used for PSI's inter-frame feature extraction.
         
         Returns:
             dict with:
-                'decoded_frames': (B, C, H, W) - single PSI decoded RGB frame in [-1, 1]
-                                  (VAE encode once, then repeat latent for efficiency)
-                'semantic_features': (B, 8192, H_psi, W_psi) - raw PSI features
+                'decoded_frames': (B, 2, C, H, W) - PSI decoded RGB frames in [-1, 1]
+                                  One for each input frame (both frames decoded)
+                'semantic_features': (B, 2, 8192, H_psi, W_psi) - raw PSI features per frame
                                      H_psi, W_psi = 32, 32 (PSI patch grid)
         """
         batch_size, num_frames, channels, height, width = control_pixel_values.shape
+        
+        # Expect exactly 2 frames from dataloader
+        assert num_frames == 2, f"Expected 2 frames from dataloader, got {num_frames}"
         
         # Convert from [-1, 1] to [0, 1] for PSIPredictor
         # PSI expects images in [0, 1] range
@@ -180,33 +183,17 @@ class PSIControlFeatureExtractor(nn.Module):
         batch_semantic_features = []
         
         for b in range(batch_size):
-            # Get frames for this sample: (F, C, H, W)
+            # Get frames for this sample: (F, C, H, W) where F=2
             sample_frames = rgb_frames_01[b]
             
             # ==================================================================
-            # Sample 2 frames that are time_gap_sec apart
+            # Process both frames (pre-sampled by dataloader)
             # ==================================================================
-            # Estimate FPS if not provided (assume video is ~2-3 seconds)
-            _fps = fps
-            if _fps is None:
-                estimated_duration = 2.0  # seconds
-                _fps = num_frames / estimated_duration
+            # Frame indices are 0 and 1 (corresponding to frame 0 and sampled second frame)
+            sampled_indices = [0, 1]
             
-            # Calculate frame indices for 2 frames with time_gap_sec apart
-            frames_per_gap = int(_fps * self.time_gap_sec)
-            
-            # Always sample: frame 0 and frame at +time_gap_sec
-            frame_idx_0 = 0
-            frame_idx_1 = min(frames_per_gap, num_frames - 1)
-            
-            # Handle edge case: if video is too short, use first and last frame
-            if frame_idx_1 == frame_idx_0:
-                frame_idx_1 = num_frames - 1
-            
-            sampled_indices = [frame_idx_0, frame_idx_1]
-            
-            print(f"[PSI GPU={self.device}] Extracting from 2 frames: {sampled_indices} "
-                  f"(out of {num_frames} total, time gap: {self.time_gap_sec}s, fps: {_fps:.1f})")
+            print(f"[PSI GPU={self.device}] Extracting from 2 frames "
+                  f"(time gap: {time_gap_sec:.3f}s, fps: {fps})")
             
             psi_start_time = time.time()
             
@@ -246,7 +233,7 @@ class PSIControlFeatureExtractor(nn.Module):
             prompt = "rgb0,rgb1->rgb1"
             
             # Time codes: 0ms and time_gap_sec*1000 ms
-            time_codes = [0, int(self.time_gap_sec * 1000)]
+            time_codes = [0, int(time_gap_sec * 1000)]
             
             # Call parallel_extract_features (no gradients needed)
             with torch.no_grad():
@@ -289,85 +276,94 @@ class PSIControlFeatureExtractor(nn.Module):
                 )
             
             # ==================================================================
-            # Part 1: Process decoded frame (last frame = prediction)
+            # Part 1: Process BOTH decoded frames (frame 0 and sampled second frame)
             # ==================================================================
             if len(decoded_frames_list) < 2:
                 raise ValueError(f"Expected at least 2 decoded frames, got {len(decoded_frames_list)}")
             
-            # Get the last decoded frame (PSI's prediction)
-            decoded_frame = decoded_frames_list[-1]  # Last frame = prediction
-            
-            # Handle different input types (PIL Image, numpy array, or tensor)
+            # Process both frames
             from PIL import Image as PILImage
-            if isinstance(decoded_frame, PILImage.Image):
-                # Convert PIL Image to numpy array
-                decoded_frame = np.array(decoded_frame).astype(np.float32) / 255.0  # [0, 255] -> [0, 1]
+            sample_decoded_frames = []
+            for frame_idx in range(2):
+                decoded_frame = decoded_frames_list[frame_idx]
+                
+                # Handle different input types (PIL Image, numpy array, or tensor)
+                if isinstance(decoded_frame, PILImage.Image):
+                    # Convert PIL Image to numpy array
+                    decoded_frame = np.array(decoded_frame).astype(np.float32) / 255.0  # [0, 255] -> [0, 1]
+                
+                if isinstance(decoded_frame, np.ndarray):
+                    decoded_frame = torch.from_numpy(decoded_frame)
+                
+                # Convert to (C, H, W) and normalize to [-1, 1] for VAE
+                if decoded_frame.dim() == 3 and decoded_frame.shape[-1] == 3:
+                    decoded_frame = decoded_frame.permute(2, 0, 1)  # (H, W, C) -> (C, H, W)
+                decoded_frame = decoded_frame.float()
+                if decoded_frame.max() <= 1.0:
+                    decoded_frame = decoded_frame * 2.0 - 1.0  # [0,1] -> [-1,1]
+                
+                # Resize to match input size
+                if decoded_frame.shape[1] != height or decoded_frame.shape[2] != width:
+                    decoded_frame = torch.nn.functional.interpolate(
+                        decoded_frame.unsqueeze(0),
+                        size=(height, width),
+                        mode='bilinear',
+                        align_corners=False
+                    ).squeeze(0)
+                
+                decoded_frame = decoded_frame.to(control_pixel_values.device, control_pixel_values.dtype)
+                sample_decoded_frames.append(decoded_frame)
             
-            if isinstance(decoded_frame, np.ndarray):
-                decoded_frame = torch.from_numpy(decoded_frame)
-            
-            # Convert to (C, H, W) and normalize to [-1, 1] for VAE
-            if decoded_frame.dim() == 3 and decoded_frame.shape[-1] == 3:
-                decoded_frame = decoded_frame.permute(2, 0, 1)  # (H, W, C) -> (C, H, W)
-            decoded_frame = decoded_frame.float()
-            if decoded_frame.max() <= 1.0:
-                decoded_frame = decoded_frame * 2.0 - 1.0  # [0,1] -> [-1,1]
-            
-            # Resize to match input size
-            if decoded_frame.shape[1] != height or decoded_frame.shape[2] != width:
-                decoded_frame = torch.nn.functional.interpolate(
-                    decoded_frame.unsqueeze(0),
-                    size=(height, width),
-                    mode='bilinear',
-                    align_corners=False
-                ).squeeze(0)
-            
-            # Output single decoded frame (NOT repeated)
-            # Shape: (C, H, W) - will be VAE encoded once, then latent is repeated
-            decoded_frame = decoded_frame.to(control_pixel_values.device, control_pixel_values.dtype)
-            
-            batch_decoded_frames.append(decoded_frame)
+            # Stack frames: (2, C, H, W)
+            sample_decoded_frames = torch.stack(sample_decoded_frames, dim=0)
+            batch_decoded_frames.append(sample_decoded_frames)
             
             # ==================================================================
-            # Part 2: Extract raw semantic features (no projection here)
+            # Part 2: Extract raw semantic features for BOTH frames
             # ==================================================================
+            sample_semantic_features = []
             if hidden_states_list is not None and embeddings_list is not None:
-                # Use last frame's features (prediction frame)
-                hidden_state = hidden_states_list[-1]
-                embeddings = embeddings_list[-1]
-                
-                # Remove extra dimensions: (1, 32, 32, 1, 4096) -> (32, 32, 4096)
-                hidden_state = hidden_state.squeeze(0).squeeze(-2)
-                embeddings = embeddings.squeeze(0).squeeze(-2)
-                
-                # Combine hidden states and embeddings: (32, 32, 8192)
-                combined = torch.cat([hidden_state, embeddings], dim=-1)
-                
-                # Reshape: (32, 32, 8192) -> (8192, 32, 32)
-                semantic_features = combined.permute(2, 0, 1)
-                semantic_features = semantic_features.to(control_pixel_values.device, control_pixel_values.dtype)
+                for frame_idx in range(2):
+                    hidden_state = hidden_states_list[frame_idx]
+                    embeddings = embeddings_list[frame_idx]
+                    
+                    # Remove extra dimensions: (1, 32, 32, 1, 4096) -> (32, 32, 4096)
+                    hidden_state = hidden_state.squeeze(0).squeeze(-2)
+                    embeddings = embeddings.squeeze(0).squeeze(-2)
+                    
+                    # Combine hidden states and embeddings: (32, 32, 8192)
+                    combined = torch.cat([hidden_state, embeddings], dim=-1)
+                    
+                    # Reshape: (32, 32, 8192) -> (8192, 32, 32)
+                    semantic_features = combined.permute(2, 0, 1)
+                    semantic_features = semantic_features.to(control_pixel_values.device, control_pixel_values.dtype)
+                    sample_semantic_features.append(semantic_features)
             else:
-                # No semantic features available, create zeros
-                semantic_features = torch.zeros(
-                    self.PSI_FEATURE_DIM, 32, 32,
-                    device=control_pixel_values.device,
-                    dtype=control_pixel_values.dtype
-                )
+                # No semantic features available, create zeros for both frames
+                for _ in range(2):
+                    semantic_features = torch.zeros(
+                        self.PSI_FEATURE_DIM, 32, 32,
+                        device=control_pixel_values.device,
+                        dtype=control_pixel_values.dtype
+                    )
+                    sample_semantic_features.append(semantic_features)
             
-            batch_semantic_features.append(semantic_features)
+            # Stack: (2, 8192, 32, 32)
+            sample_semantic_features = torch.stack(sample_semantic_features, dim=0)
+            batch_semantic_features.append(sample_semantic_features)
         
         # Stack batch
-        # decoded_frames: (B, C, H, W) - single frame per sample (NOT repeated)
+        # decoded_frames: (B, 2, C, H, W) - both frames per sample
         decoded_frames = torch.stack(batch_decoded_frames, dim=0)
-        # semantic_features: (B, 8192, 32, 32)
+        # semantic_features: (B, 2, 8192, 32, 32) - features for both frames
         semantic_features = torch.stack(batch_semantic_features, dim=0)
         
-        print(f"[PSI] Output decoded_frame: {decoded_frames.shape} (single frame, will be VAE-encoded once)")
-        print(f"[PSI] Output semantic_features: {semantic_features.shape}")
+        print(f"[PSI] Output decoded_frames: {decoded_frames.shape} (2 frames)")
+        print(f"[PSI] Output semantic_features: {semantic_features.shape} (2 frames)")
         
         return {
-            'decoded_frames': decoded_frames, # (B, 3, H, W)
-            'semantic_features': semantic_features, # (B, 8192, 32, 32)
+            'decoded_frames': decoded_frames,  # (B, 2, C, H, W) - both frames
+            'semantic_features': semantic_features,  # (B, 2, 8192, 32, 32) - features for both frames
         }
     
     @classmethod
@@ -439,10 +435,10 @@ if __name__ == "__main__":
         print(f"\nResults:")
         print(f"  Input shape:           {control_input.shape}")
         print(f"  decoded_frames shape:  {decoded_frames.shape}")
-        print(f"  Expected:              ({batch_size}, 3, {num_frames}, {height}, {width})")
+        print(f"  Expected:              ({batch_size}, 2, 3, {height}, {width})")
         print(f"  decoded_frames range:  [{decoded_frames.min().item():.4f}, {decoded_frames.max().item():.4f}]")
         print(f"  semantic_features shape: {semantic_features.shape}")
-        print(f"  Expected:                ({batch_size}, {PSIControlFeatureExtractor.PSI_FEATURE_DIM}, 32, 32)")
+        print(f"  Expected:                ({batch_size}, 2, {PSIControlFeatureExtractor.PSI_FEATURE_DIM}, 32, 32)")
         
         print("\n" + "=" * 80)
         print("✓ Test completed successfully!")

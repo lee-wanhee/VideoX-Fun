@@ -1191,6 +1191,9 @@ def main():
             # Used in Control Camera Ref Mode
             if args.train_mode == "control_camera_ref":
                 new_examples["control_camera_values"] = []
+            # Used in PSI Control Mode
+            if args.enable_psi_control:
+                new_examples["psi_control_meta"] = []
 
             # Get downsample ratio in image and videos
             pixel_value     = examples[0]["pixel_values"]
@@ -1354,6 +1357,20 @@ def main():
                         new_examples["control_camera_values"].append(transform_no_normalize(local_control_camera_values))
                 
                 new_examples["text"].append(example["text"])
+                
+                # Collect PSI control metadata
+                if args.enable_psi_control:
+                    psi_meta = example.get("psi_control_meta", None)
+                    if psi_meta is None:
+                        # Default fallback if metadata is missing
+                        psi_meta = {
+                            'first_frame_idx': 0,
+                            'second_frame_offset': 13,  # Default ~0.43s at 30fps (1+4*3)
+                            'second_frame_latent_idx': 4,  # 1 + (13-1)//4 = 4
+                            'time_gap_sec': 13 / 30.0,  # ~0.433s
+                            'fps': 30.0,
+                        }
+                    new_examples["psi_control_meta"].append(psi_meta)
 
                 if args.train_mode != "control":
                     if args.control_ref_image == "first_frame":
@@ -1816,14 +1833,34 @@ def main():
                             # PSI Control: Extract features from 2-frame control video
                             # control_pixel_values: (B, 2, C, H, W) - 2 frames from dataset
                             
-                            # 1. Get PSI features and decoded frame (no grad - extractor is frozen)
-                            psi_outputs = psi_control_extractor(control_pixel_values)
-                            decoded_frames = psi_outputs['decoded_frames']  # (B, C, H, W) single frame
-                            psi_semantic_features = psi_outputs['semantic_features']  # (B, 8192, 32, 32)
+                            # Get PSI control metadata from batch
+                            psi_control_meta = batch.get('psi_control_meta', None)
                             
-                            # 2. VAE encode the decoded frame (single frame)
-                            decoded_frames_5d = decoded_frames.unsqueeze(1)  # (B, 1, C, H, W)
-                            control_latents_base = _batch_encode_vae(decoded_frames_5d)  # (B, C_latent, 1, H', W')
+                            # Get time gap from metadata (per-sample, use first one for now)
+                            time_gap_sec = None
+                            if psi_control_meta is not None and len(psi_control_meta) > 0:
+                                time_gap_sec = psi_control_meta[0].get('time_gap_sec', None)
+                            
+                            # 1. Get PSI features and decoded frames (no grad - extractor is frozen)
+                            psi_outputs = psi_control_extractor(control_pixel_values, time_gap_sec=time_gap_sec)
+                            decoded_frames = psi_outputs['decoded_frames']  # (B, 2, C, H, W) - both frames
+                            psi_semantic_features = psi_outputs['semantic_features']  # (B, 2, 8192, 32, 32)
+                            
+                            # 2. VAE encode BOTH decoded frames
+                            # Shape: (B, 2, C, H, W) -> encode each frame separately
+                            B, num_psi_frames, C, H, W = decoded_frames.shape
+                            decoded_frames_flat = decoded_frames.view(B * num_psi_frames, 1, C, H, W).transpose(1, 2)  # (B*2, C, 1, H, W)
+                            control_latents_flat = _batch_encode_vae(decoded_frames_flat.transpose(1, 2))  # (B*2, C_latent, 1, H', W')
+                            # Reshape back: (B*2, C_latent, 1, H', W') -> (B, 2, C_latent, H', W')
+                            _, C_latent, _, H_latent, W_latent = control_latents_flat.shape
+                            control_latents_base = control_latents_flat.view(B, num_psi_frames, C_latent, H_latent, W_latent)  # (B, 2, C_latent, H', W')
+                            
+                            # Store for later use in PSI projection step
+                            psi_control_info = {
+                                'control_latents_base': control_latents_base,  # (B, 2, C_latent, H', W')
+                                'semantic_features': psi_semantic_features,  # (B, 2, 8192, 32, 32)
+                                'meta': psi_control_meta,
+                            }
                             # control_latents will be created after PSI projection (outside no_grad)
                             control_latents = None  # Initialize here, will be set after PSI projection
                         else:
@@ -1911,27 +1948,64 @@ def main():
 
                 # PSI Projection (OUTSIDE no_grad - this is trainable!)
                 if args.enable_psi_control and args.train_mode != "control_camera_ref":
-                    # 3. Project PSI semantic features (trainable)
-                    psi_projected = psi_projection(psi_semantic_features)  # (B, 16, 32, 32)
+                    # Unpack PSI control info
+                    control_latents_base = psi_control_info['control_latents_base']  # (B, 2, C_latent, H', W')
+                    psi_semantic_features = psi_control_info['semantic_features']  # (B, 2, 8192, 32, 32)
+                    psi_control_meta = psi_control_info['meta']
+                    
+                    B, num_psi_frames, C_latent, H_latent, W_latent = control_latents_base.shape
+                    num_latent_frames = latents.shape[2]  # Total latent frames in video
+                    
+                    # 3. Project PSI semantic features for BOTH frames (trainable)
+                    # Reshape: (B, 2, 8192, 32, 32) -> (B*2, 8192, 32, 32)
+                    psi_semantic_flat = psi_semantic_features.view(B * num_psi_frames, -1, 32, 32)
+                    psi_projected_flat = psi_projection(psi_semantic_flat)  # (B*2, 16, 32, 32)
                     
                     # 4. Upsample PSI features to match VAE latent spatial size
-                    latent_h, latent_w = control_latents_base.shape[-2], control_latents_base.shape[-1]
-                    psi_projected = F.interpolate(
-                        psi_projected, 
-                        size=(latent_h, latent_w), 
+                    psi_projected_flat = F.interpolate(
+                        psi_projected_flat, 
+                        size=(H_latent, W_latent), 
                         mode='bilinear', 
                         align_corners=False
-                    )  # (B, 16, H', W')
+                    )  # (B*2, 16, H', W')
                     
-                    # 5. Add PSI features to VAE latent (broadcast over time)
-                    psi_projected = psi_projected.unsqueeze(2)  # (B, 16, 1, H', W')
-                    psi_control_latents = control_latents_base + psi_projected  # (B, 16, 1, H', W')
+                    # Reshape back: (B*2, 16, H', W') -> (B, 2, 16, H', W')
+                    psi_projected = psi_projected_flat.view(B, num_psi_frames, C_latent, H_latent, W_latent)
                     
-                    # 6. Repeat to match video length (num_frames)
-                    num_frames = latents.shape[2]
-                    psi_control_latents = psi_control_latents.repeat(1, 1, num_frames, 1, 1)  # (B, 16, T, H', W')
+                    # 5. Build control latents with proper masking
+                    # For PSI-controlled frames (0 and second_frame_latent_idx): VAE + psi_projected
+                    # For non-controlled frames: mask_embedding
                     
-                    # 7. Make PSI control latents to zero (with probability) - for classifier-free guidance
+                    # Get mask embedding (trainable, 0-initialized)
+                    mask_embedding = psi_projection.get_mask_embedding((H_latent, W_latent))  # (1, 16, H', W')
+                    mask_embedding = mask_embedding.to(latents.device, latents.dtype)
+                    
+                    # Initialize control latents with mask embedding (all frames start as masked)
+                    psi_control_latents = mask_embedding.unsqueeze(2).expand(B, -1, num_latent_frames, -1, -1).clone()
+                    
+                    # For each sample, place PSI-controlled frames at correct latent indices # TODO: batch operation
+                    for bs_index in range(B):
+                        # Frame 0 is always at latent index 0
+                        psi_control_latents[bs_index, :, 0, :, :] = (
+                            control_latents_base[bs_index, 0, :, :, :] +  # VAE(decoded_frame_0)
+                            psi_projected[bs_index, 0, :, :, :]  # psi_projected_0
+                        )
+                        
+                        # Second frame: get latent index from metadata
+                        if psi_control_meta is not None and len(psi_control_meta) > bs_index:
+                            second_latent_idx = psi_control_meta[bs_index].get('second_frame_latent_idx', 1)
+                        else:
+                            second_latent_idx = 1  # Default fallback
+                        
+                        # Clamp to valid range
+                        second_latent_idx = min(second_latent_idx, num_latent_frames - 1)
+                        
+                        psi_control_latents[bs_index, :, second_latent_idx, :, :] = (
+                            control_latents_base[bs_index, 1, :, :, :] +  # VAE(decoded_frame_1)
+                            psi_projected[bs_index, 1, :, :, :]  # psi_projected_1
+                        )
+                    
+                    # 6. Make PSI control latents to zero (with probability) - for classifier-free guidance
                     for bs_index in range(psi_control_latents.size()[0]):
                         if rng is None:
                             zero_init_control_latents_conv_in = np.random.choice([0, 1], p = [0.90, 0.10])
@@ -1941,7 +2015,7 @@ def main():
                         if zero_init_control_latents_conv_in:
                             psi_control_latents[bs_index] = psi_control_latents[bs_index] * 0
                     
-                    # 8. Combine PSI control with existing control_latents (ref_latents if present)
+                    # 7. Combine PSI control with existing control_latents (ref_latents if present)
                     # This maintains the same channel structure as non-PSI: [control, ref]
                     if control_latents is None:
                         control_latents = psi_control_latents
