@@ -1849,8 +1849,9 @@ def main():
                             # 2. VAE encode BOTH decoded frames
                             # Shape: (B, 2, C, H, W) -> encode each frame separately
                             B, num_psi_frames, C, H, W = decoded_frames.shape
-                            decoded_frames_flat = decoded_frames.view(B * num_psi_frames, 1, C, H, W).transpose(1, 2)  # (B*2, C, 1, H, W)
-                            control_latents_flat = _batch_encode_vae(decoded_frames_flat.transpose(1, 2))  # (B*2, C_latent, 1, H', W')
+                            # decoded_frames: (B, 2, C, H, W) -> need (B*2, C, 1, H, W) for VAE
+                            decoded_frames_flat = decoded_frames.view(B * num_psi_frames, C, H, W).unsqueeze(2)  # (B*2, C, 1, H, W)
+                            control_latents_flat = _batch_encode_vae(decoded_frames_flat)  # (B*2, C_latent, 1, H', W')
                             # Reshape back: (B*2, C_latent, 1, H', W') -> (B, 2, C_latent, H', W')
                             _, C_latent, _, H_latent, W_latent = control_latents_flat.shape
                             control_latents_base = control_latents_flat.view(B, num_psi_frames, C_latent, H_latent, W_latent)  # (B, 2, C_latent, H', W')

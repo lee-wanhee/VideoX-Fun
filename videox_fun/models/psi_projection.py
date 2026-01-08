@@ -124,6 +124,11 @@ class PSIProjectionSwiGLU(nn.Module):
 
         # norm weight already ones by default
 
+    @property
+    def dtype(self):
+        """Return the dtype of the model (required by diffusers pipeline)."""
+        return self.proj_up.weight.dtype
+
     def forward(self, x):
         """
         Project PSI features to latent space.

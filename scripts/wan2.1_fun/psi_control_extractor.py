@@ -109,6 +109,15 @@ class PSIControlFeatureExtractor(nn.Module):
         
         print("✓ PSIPredictor loaded successfully (frozen, no learnable params)")
         
+        # Register a dummy parameter for diffusers pipeline compatibility
+        # This is needed because accelerate hooks require at least one parameter to determine device
+        self._dummy_param = nn.Parameter(torch.zeros(1, dtype=torch.bfloat16), requires_grad=False)
+    
+    @property
+    def dtype(self):
+        """Return the dtype of the model (required by diffusers pipeline)."""
+        return torch.bfloat16
+        
     def create_mask_indices(self, mask_ratio: float, num_frames: int, seed: int = 0) -> list:
         """
         Create unmask indices for each frame in a 32x32 patch grid.
