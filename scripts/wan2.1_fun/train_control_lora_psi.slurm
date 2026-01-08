@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=train_psi_control
 #SBATCH --partition=batch
-#SBATCH --account=marlowe-m000063
+#SBATCH --account=marlowe-m000063-pm04
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
-#SBATCH --cpus-per-task=64
+#SBATCH --cpus-per-task=112
 #SBATCH --mem=1000GB
-#SBATCH --time=48:00:00
+#SBATCH --time=2-00:00:00
 #SBATCH --output=/scratch/m000063/users/wanhee/VideoX-Fun/logs/train_psi_%j.out
 #SBATCH --error=/scratch/m000063/users/wanhee/VideoX-Fun/logs/train_psi_%j.err
 
