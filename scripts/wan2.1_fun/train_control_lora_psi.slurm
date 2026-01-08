@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=train_psi_control
 #SBATCH --partition=batch
-#SBATCH --account=marlowe-m000063-pm01
+#SBATCH --account=marlowe-m000063
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
