@@ -671,9 +671,13 @@ class WanFunControlPipeline(DiffusionPipeline):
             _, C_latent, _, H_latent, W_latent = control_latents_flat.shape
             control_latents_base = control_latents_flat.view(B, num_psi_frames, C_latent, H_latent, W_latent)  # (B, 2, C_latent, H', W')
             
-            # 3. Project PSI features for BOTH frames
+            # 3. Project PSI features for BOTH frames (also get mask embedding)
             psi_semantic_flat = psi_semantic_features.view(B * num_psi_frames, -1, 32, 32)
-            psi_projected_flat = self.psi_projection(psi_semantic_flat)  # (B*2, 16, 32, 32)
+            psi_projected_flat, mask_embedding = self.psi_projection(
+                psi_semantic_flat,
+                return_mask_embedding=True,
+                mask_spatial_size=(H_latent, W_latent)
+            )  # (B*2, 16, 32, 32), (1, 16, H', W')
             
             # 4. Upsample to match VAE latent spatial size
             psi_projected_flat = F.interpolate(
@@ -688,9 +692,6 @@ class WanFunControlPipeline(DiffusionPipeline):
             # PSI-controlled frames: VAE + psi_projected
             # Non-controlled frames: mask_embedding
             num_latent_frames = (num_frames - 1) // self.vae.config.temporal_compression_ratio + 1
-            
-            # Get mask embedding for non-controlled frames
-            mask_embedding = self.psi_projection.get_mask_embedding((H_latent, W_latent))  # (1, 16, H', W')
             mask_embedding = mask_embedding.to(device, weight_dtype)
             
             # Initialize control latents with mask embedding (all frames start as masked)

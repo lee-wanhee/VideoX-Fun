@@ -1961,7 +1961,12 @@ def main():
                     # 3. Project PSI semantic features for BOTH frames (trainable)
                     # Reshape: (B, 2, 8192, 32, 32) -> (B*2, 8192, 32, 32)
                     psi_semantic_flat = psi_semantic_features.view(B * num_psi_frames, -1, 32, 32)
-                    psi_projected_flat = psi_projection(psi_semantic_flat)  # (B*2, 16, 32, 32)
+                    # Also get mask embedding at target spatial size
+                    psi_projected_flat, mask_embedding = psi_projection(
+                        psi_semantic_flat, 
+                        return_mask_embedding=True,
+                        mask_spatial_size=(H_latent, W_latent)
+                    )  # (B*2, 16, 32, 32), (1, 16, H', W')
                     
                     # 4. Upsample PSI features to match VAE latent spatial size
                     psi_projected_flat = F.interpolate(
@@ -1977,9 +1982,6 @@ def main():
                     # 5. Build control latents with proper masking
                     # For PSI-controlled frames (0 and second_frame_latent_idx): VAE + psi_projected
                     # For non-controlled frames: mask_embedding
-                    
-                    # Get mask embedding (trainable, 0-initialized)
-                    mask_embedding = psi_projection.get_mask_embedding((H_latent, W_latent))  # (1, 16, H', W')
                     mask_embedding = mask_embedding.to(latents.device, latents.dtype)
                     
                     # Initialize control latents with mask embedding (all frames start as masked)

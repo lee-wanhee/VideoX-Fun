@@ -129,15 +129,23 @@ class PSIProjectionSwiGLU(nn.Module):
         """Return the dtype of the model (required by diffusers pipeline)."""
         return self.proj_up.weight.dtype
 
-    def forward(self, x):
+    def forward(self, x, return_mask_embedding=False, mask_spatial_size=None):
         """
         Project PSI features to latent space.
         
         Args:
             x: PSI features of shape (B, n_input_channels, H, W)
+            return_mask_embedding: If True, also return the mask embedding for non-PSI frames
+            mask_spatial_size: Optional tuple (H, W) for mask embedding size. 
+                              If None, uses same size as output.
             
         Returns:
-            Projected features of shape (B, n_output_channels, H, W)
+            If return_mask_embedding=False:
+                Projected features of shape (B, n_output_channels, H, W)
+            If return_mask_embedding=True:
+                Tuple of (projected_features, mask_embedding)
+                - projected_features: (B, n_output_channels, H, W)
+                - mask_embedding: (1, n_output_channels, H_mask, W_mask) 
         """
         x = self.norm(x)                 # (B, Cin, H, W)
 
@@ -148,16 +156,14 @@ class PSIProjectionSwiGLU(nn.Module):
 
         x = self.proj_down(x)            # (B, Cout, H, W)
         x = self.drop(x)
-        return x
-    
-    def get_mask_embedding(self, spatial_size):
-        """
-        Get mask embedding for non-PSI-controlled frames.
         
-        Args:
-            spatial_size: tuple (H, W) for the spatial dimensions
-            
-        Returns:
-            Mask embedding of shape (1, n_output_channels, H, W)
-        """
-        return self.mask_projection(spatial_size)
+        if return_mask_embedding:
+            # Get spatial size for mask embedding
+            if mask_spatial_size is not None:
+                h, w = mask_spatial_size
+            else:
+                h, w = x.shape[-2], x.shape[-1]
+            mask_embedding = self.mask_projection((h, w))
+            return x, mask_embedding
+        
+        return x
