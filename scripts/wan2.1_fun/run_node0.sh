@@ -34,7 +34,7 @@ export NCCL_NET_GDR_LEVEL=2
 
 # Multi-node configuration
 export MASTER_ADDR=n07
-export MASTER_PORT=29500
+export MASTER_PORT=45678
 export NODE_RANK=0
 
 NNODES=2

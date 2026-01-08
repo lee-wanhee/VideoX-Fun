@@ -53,7 +53,7 @@ export NCCL_NET_GDR_LEVEL=2
 
 # Get master node info
 export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
-export MASTER_PORT=29500
+export MASTER_PORT=45678
 
 # Calculate total number of processes
 NNODES=$SLURM_NNODES
