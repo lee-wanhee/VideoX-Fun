@@ -615,26 +615,7 @@ def main():
         print(f"PSI Control: frame {first_frame_idx} ({first_frame_idx/psi_source_fps:.2f}s) + frame {second_frame_idx} ({second_frame_idx/psi_source_fps:.2f}s)")
         print(f"  Time gap: {psi_time_gap_sec:.3f}s, latent idx: {psi_second_latent_idx}")
 
-        # =====================================================================
-        # Extract PSI decoded frames before pipeline for saving
-        # =====================================================================
-        print("Extracting PSI features for visualization...")
-        
-        # Prepare input for PSI extractor: (B, F, C, H, W) in [-1, 1]
-        psi_input = psi_control_video.permute(0, 2, 1, 3, 4)  # (B, C, F, H, W) -> (B, F, C, H, W)
-        psi_input = psi_input * 2.0 - 1.0  # [0, 1] -> [-1, 1]
-        psi_input = psi_input.to(device, weight_dtype)
-        
-        # Extract PSI features
-        psi_outputs = psi_control_extractor(psi_input, time_gap_sec=psi_time_gap_sec)
-        psi_decoded_frames = psi_outputs['decoded_frames']  # (B, 2, C, H, W) in [-1, 1]
-        
-        print(f"PSI decoded frames shape: {psi_decoded_frames.shape}")
-        
-        # =====================================================================
-        # Visualize PSI masking (once, using first seed)
-        # =====================================================================
-        # Create output directory early for visualization
+        # Create output directory
         if not os.path.exists(run_save_path):
             os.makedirs(run_save_path, exist_ok=True)
         
@@ -642,15 +623,10 @@ def main():
         vis_frame0 = full_control_video[0, :, first_frame_idx]  # (C, H, W)
         vis_frame1 = full_control_video[0, :, second_frame_idx]  # (C, H, W)
         
-        # Visualize masking (same mask ratios as PSI extractor defaults)
-        mask_viz_path = os.path.join(run_save_path, "psi_masking_visualization.png")
-        visualize_psi_masking(
-            vis_frame0, vis_frame1,
-            mask_ratio_cond=0.0,  # Frame 0: fully visible
-            mask_ratio_pred=0.9,  # Frame 1: 90% masked
-            seed=run_seeds[0],  # Use first seed for visualization
-            output_path=mask_viz_path
-        )
+        # Prepare input for PSI extractor: (B, F, C, H, W) in [-1, 1]
+        psi_input = psi_control_video.permute(0, 2, 1, 3, 4)  # (B, C, F, H, W) -> (B, F, C, H, W)
+        psi_input = psi_input * 2.0 - 1.0  # [0, 1] -> [-1, 1]
+        psi_input = psi_input.to(device, weight_dtype)
         
         # =====================================================================
         # Use first PSI frame as reference image for CLIP and start_image
@@ -678,6 +654,14 @@ def main():
             torch.manual_seed(run_seed)
             np.random.seed(run_seed)
             generator = torch.Generator(device=device).manual_seed(run_seed)
+            
+            # =====================================================================
+            # Extract PSI features with this seed (different mask for each seed)
+            # =====================================================================
+            print(f"Extracting PSI features with seed={run_seed}...")
+            psi_outputs = psi_control_extractor(psi_input, time_gap_sec=psi_time_gap_sec, seed=run_seed)
+            psi_decoded_frames = psi_outputs['decoded_frames']  # (B, 2, C, H, W) in [-1, 1]
+            print(f"PSI decoded frames shape: {psi_decoded_frames.shape}")
 
             # Generate video
             # start_image is concatenated with PSI control latents on channel dimension (matching training)
@@ -695,6 +679,7 @@ def main():
                 control_video=psi_control_video,  # 2-frame control video
                 psi_time_gap_sec=psi_time_gap_sec,  # Time gap between frames
                 psi_second_latent_idx=psi_second_latent_idx,  # Latent index for second frame
+                psi_seed=run_seed,  # Seed for PSI mask generation
                 start_image=start_image_tensor,  # First frame as reference (matching training's ref_latents_conv_in)
                 clip_image=clip_image,  # First frame used for CLIP conditioning
             ).videos
@@ -779,6 +764,17 @@ def main():
                 output_path=gt_vs_pred_path
             )
             
+            # 8. Save PSI masking visualization
+            # Masking is now seed-dependent (different mask pattern for each seed)
+            mask_viz_path = os.path.join(run_save_path, f"{prefix}_psi_masking.png")
+            visualize_psi_masking(
+                vis_frame0, vis_frame1,
+                mask_ratio_cond=0.0,  # Frame 0: fully visible
+                mask_ratio_pred=0.9,  # Frame 1: 90% masked
+                seed=run_seed,  # Each seed gets different mask pattern
+                output_path=mask_viz_path
+            )
+            
             print("")
 
     print("=" * 60)
@@ -794,7 +790,7 @@ def main():
     print(f"  seed*_input_frame1.png       - Original input frame 1 (GT)")
     print(f"  seed*_pred_frame1.png        - Predicted frame 1 from generated video")
     print(f"  seed*_gt_vs_pred.png         - GT vs Predicted comparison plot")
-    print(f"  psi_masking_visualization.png - Masking visualization")
+    print(f"  seed*_psi_masking.png        - PSI masking visualization")
     print("=" * 60)
 
 

@@ -65,7 +65,6 @@ class PSIControlFeatureExtractor(nn.Module):
         temperature: float = 1.0,
         top_p: float = 0.9,
         top_k: int = 1000,
-        seed: int = 42,
         **kwargs
     ):
         super().__init__()
@@ -84,7 +83,6 @@ class PSIControlFeatureExtractor(nn.Module):
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k
-        self.seed = seed
         
         # Initialize PSIPredictor
         print(f"Initializing PSIPredictor...")
@@ -118,21 +116,26 @@ class PSIControlFeatureExtractor(nn.Module):
         """Return the dtype of the model (required by diffusers pipeline)."""
         return torch.bfloat16
         
-    def create_mask_indices(self, mask_ratio: float, num_frames: int, seed: int = 0) -> list:
+    def create_mask_indices(self, mask_ratio: float, num_frames: int, seed: int = None) -> list:
         """
         Create unmask indices for each frame in a 32x32 patch grid.
         
         Args:
             mask_ratio: Ratio of patches to mask (0.0 = all visible, 1.0 = all masked)
             num_frames: Number of frames
-            seed: Random seed
+            seed: Random seed. If None, uses current random state (for training diversity).
+                  If provided, sets the seed for reproducible masks (for inference).
             
         Returns:
             List of unmask indices for each frame
         """
         import random
-        random.seed(seed)
-        np.random.seed(seed)
+        
+        # Only set seed if explicitly provided (for reproducible inference)
+        # During training, seed=None uses current random state for diverse masks
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
         
         # Total patches in 32x32 grid (PSI uses 32x32 patches)
         total_patches = 1024
@@ -152,7 +155,7 @@ class PSIControlFeatureExtractor(nn.Module):
         
         return unmask_indices_list
     
-    def forward(self, control_pixel_values, fps=30.0, time_gap_sec=0.5):
+    def forward(self, control_pixel_values, fps=30.0, time_gap_sec=0.5, seed=None):
         """
         Extract raw features from input video frames using PSIPredictor.
         
@@ -170,6 +173,8 @@ class PSIControlFeatureExtractor(nn.Module):
             fps: Frames per second of the video (default: 30.0, for logging)
             time_gap_sec: Actual time gap between the two frames in seconds (default: 0.5s).
                          This is used for PSI's inter-frame feature extraction.
+            seed: Random seed for reproducible masks (inference). If None, uses current
+                  random state for diverse masks (training).
         
         Returns:
             dict with:
@@ -178,6 +183,10 @@ class PSIControlFeatureExtractor(nn.Module):
                 'semantic_features': (B, 2, 8192, H_psi, W_psi) - raw PSI features per frame
                                      H_psi, W_psi = 32, 32 (PSI patch grid)
         """
+        # Use provided seed for reproducible inference, or None for training diversity
+        # When seed=None, masks will vary each forward pass (good for training)
+        # When seed is provided, masks are reproducible (good for inference)
+        current_seed = seed  # Keep as None if not provided
         batch_size, num_frames, channels, height, width = control_pixel_values.shape
         
         # Expect exactly 2 frames from dataloader
@@ -226,15 +235,20 @@ class PSIControlFeatureExtractor(nn.Module):
                 rgb_frames.append(frame_np)
             
             # Create masks for the 2 frames
+            # If seed is provided (inference), use it for reproducible masks
+            # If seed is None (training), use current random state for diverse masks
+            frame0_seed = (current_seed + b) if current_seed is not None else None
+            frame1_seed = (current_seed + b + 1) if current_seed is not None else None
+            
             unmask_indices_frame0 = self.create_mask_indices(
                 mask_ratio=self.mask_ratio_cond,
                 num_frames=1,
-                seed=self.seed + b
+                seed=frame0_seed
             )
             unmask_indices_frame1 = self.create_mask_indices(
                 mask_ratio=self.mask_ratio_pred,
                 num_frames=1, 
-                seed=self.seed + b + 1
+                seed=frame1_seed
             )
             unmask_indices_rgb = unmask_indices_frame0 + unmask_indices_frame1
             
@@ -245,6 +259,10 @@ class PSIControlFeatureExtractor(nn.Module):
             time_codes = [0, int(time_gap_sec * 1000)]
             
             # Call parallel_extract_features (no gradients needed)
+            # For PSI predictor seed: use provided seed if available, otherwise None for training diversity
+            # When seed=None, PSI predictor uses different random outputs each time (good for training)
+            psi_predictor_seed = (current_seed + b) if current_seed is not None else None
+            
             with torch.no_grad():
                 outputs = self.predictor.parallel_extract_features(
                     prompt=prompt,
@@ -260,7 +278,7 @@ class PSIControlFeatureExtractor(nn.Module):
                     index_order=None,
                     conditioning_order=None,
                     poke_vectors=None,
-                    seed=self.seed + b,
+                    seed=psi_predictor_seed,
                     num_seq_patches=32,
                     temp=self.temperature,
                     top_p=self.top_p,

@@ -482,6 +482,7 @@ class WanFunControlPipeline(DiffusionPipeline):
         psi_control_latents: Union[torch.FloatTensor] = None,
         psi_time_gap_sec: Optional[float] = None,
         psi_second_latent_idx: Optional[int] = None,
+        psi_seed: Optional[int] = None,
         start_image: Union[torch.FloatTensor] = None,
         ref_image: Union[torch.FloatTensor] = None,
         num_frames: int = 49,
@@ -658,7 +659,7 @@ class WanFunControlPipeline(DiffusionPipeline):
                 second_latent_idx = 1 + (frame_offset - 1) // 4 if frame_offset > 0 else 0
             
             # 1. Extract PSI features from 2 frames
-            psi_outputs = self.psi_control_extractor(control_pixel_values, time_gap_sec=time_gap_sec)
+            psi_outputs = self.psi_control_extractor(control_pixel_values, time_gap_sec=time_gap_sec, seed=psi_seed)
             decoded_frames = psi_outputs['decoded_frames']  # (B, 2, C, H, W)
             psi_semantic_features = psi_outputs['semantic_features']  # (B, 2, 8192, 32, 32)
             
