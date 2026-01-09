@@ -1844,13 +1844,19 @@ def main():
                             # 1. Get PSI features and decoded frames (no grad - extractor is frozen)
                             psi_outputs = psi_control_extractor(control_pixel_values, time_gap_sec=time_gap_sec)
                             
-                            # Skip batch if PSI extraction failed (e.g., not enough decoded frames)
+                            # Handle PSI extraction failure - must NOT skip to avoid distributed deadlock
+                            # All ranks must participate in gradient sync, so we use zeros instead
                             if psi_outputs is None:
-                                print(f"[Rank {accelerator.process_index}] Skipping batch due to PSI extraction failure")
-                                continue
-                            
-                            decoded_frames = psi_outputs['decoded_frames']  # (B, 2, C, H, W) - both frames
-                            psi_semantic_features = psi_outputs['semantic_features']  # (B, 2, 8192, 32, 32)
+                                print(f"[Rank {accelerator.process_index}] PSI extraction failed - using zeros for this batch")
+                                B = control_pixel_values.shape[0]
+                                device = control_pixel_values.device
+                                dtype = control_pixel_values.dtype
+                                # Create dummy tensors with expected shapes
+                                decoded_frames = torch.zeros(B, 2, 3, 512, 512, device=device, dtype=dtype)
+                                psi_semantic_features = torch.zeros(B, 2, 8192, 32, 32, device=device, dtype=dtype)
+                            else:
+                                decoded_frames = psi_outputs['decoded_frames']  # (B, 2, C, H, W) - both frames
+                                psi_semantic_features = psi_outputs['semantic_features']  # (B, 2, 8192, 32, 32)
                             
                             # 2. VAE encode BOTH decoded frames
                             # Shape: (B, 2, C, H, W) -> encode each frame separately
