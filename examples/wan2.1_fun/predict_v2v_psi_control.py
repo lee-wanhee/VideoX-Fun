@@ -14,6 +14,7 @@ import os
 import sys
 
 import cv2
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -52,8 +53,9 @@ config_path = "config/wan2.1/wan_civitai.yaml"
 model_name = "models/Wan2.1-Fun-1.3B-Control"  # Base model path
 
 # Trained checkpoint paths - UPDATE THESE
-lora_path = None  # Path to trained LoRA checkpoint, e.g., "output_psi_control/checkpoint-5000.safetensors"
-psi_projection_path = None  # Path to trained PSI projection, e.g., "output_psi_control/psi_projection-5000.safetensors"
+lora_path = "output_psi_control_test/checkpoint-5000.safetensors"  # Path to trained LoRA checkpoint
+psi_projection_path = "output_psi_control_test/psi_projection-5000.safetensors"  # Path to trained PSI projection
+checkpoint_iteration = 5000  # Iteration number for output naming
 
 # PSI Control Extractor config (same as training)
 psi_control_extractor_config = {
@@ -72,9 +74,13 @@ output_fps = 16  # Output video fps
 
 # PSI Control settings (matching training)
 # The model was trained with frames sampled at (1+4*n) offsets within 0.2-1.0s
-# For inference, pick a specific offset (e.g., frame 13 at 30fps = 0.43s, latent idx 4)
-psi_control_frame_offset = 13  # Second frame index relative to first frame
+# For inference, pick specific frame times (e.g., 1.0s and 1.5s)
 psi_source_fps = 30.0  # FPS of the source control video
+psi_start_time_sec = 0.5  # Start time for first PSI frame (seconds)
+psi_time_gap_sec_config = 0.5  # Time gap between two PSI frames (seconds)
+# Computed frame indices
+psi_start_frame = int(psi_start_time_sec * psi_source_fps)  # Frame 30 at 30fps for 1.0s
+psi_control_frame_offset = int(psi_time_gap_sec_config * psi_source_fps)  # Frame offset: 15 for 0.5s gap
 
 # Generation settings
 prompt = "A video"
@@ -84,8 +90,8 @@ seed = 42  # Fixed random seed
 num_inference_steps = 50
 lora_weight = 1.0
 
-# Output
-save_path = "samples/psi-control-output"
+# Output - includes model name and iteration for tracking
+save_path = f"samples/psi-control-output/output_psi_control_test-{checkpoint_iteration}"
 
 # Use torch.float16 if GPU does not support torch.bfloat16
 weight_dtype = torch.bfloat16
@@ -185,6 +191,136 @@ def save_video_from_tensor(tensor, output_path, fps):
     out.release()
 
 
+def visualize_psi_masking(frame0, frame1, mask_ratio_cond=0.0, mask_ratio_pred=0.9, 
+                          seed=42, output_path=None):
+    """Visualize PSI masking on two frames.
+    
+    Creates a 2x2 plot showing:
+    - Row 1: Original frame0, Original frame1
+    - Row 2: Masked frame0, Masked frame1
+    
+    Args:
+        frame0: First frame tensor (C, H, W) in [0, 1] range
+        frame1: Second frame tensor (C, H, W) in [0, 1] range
+        mask_ratio_cond: Mask ratio for conditioning frame (default 0.0)
+        mask_ratio_pred: Mask ratio for prediction frame (default 0.9)
+        seed: Random seed for mask generation
+        output_path: Path to save the figure
+    """
+    # Convert tensors to numpy for visualization
+    if isinstance(frame0, torch.Tensor):
+        frame0_np = frame0.permute(1, 2, 0).float().cpu().numpy()
+    else:
+        frame0_np = frame0
+    if isinstance(frame1, torch.Tensor):
+        frame1_np = frame1.permute(1, 2, 0).float().cpu().numpy()
+    else:
+        frame1_np = frame1
+    
+    # PSI uses 32x32 patch grid (each patch is 16x16 pixels for 512x512 images)
+    patch_grid_size = 32
+    total_patches = patch_grid_size * patch_grid_size  # 1024
+    
+    H, W = frame0_np.shape[:2]
+    patch_h = H // patch_grid_size
+    patch_w = W // patch_grid_size
+    
+    def create_mask_indices(mask_ratio, seed_offset):
+        """Create unmask indices for a 32x32 patch grid."""
+        np.random.seed(seed + seed_offset)
+        n_unmask = int(total_patches * (1 - mask_ratio))
+        unmask_indices = np.random.choice(total_patches, n_unmask, replace=False)
+        return set(unmask_indices)
+    
+    def apply_patch_mask(frame, unmask_indices):
+        """Apply patch-level masking to a frame."""
+        masked_frame = np.zeros_like(frame)
+        # Create a gray background for masked regions
+        masked_frame[:, :] = [0.5, 0.5, 0.5]  # Gray
+        
+        for patch_idx in unmask_indices:
+            row = patch_idx // patch_grid_size
+            col = patch_idx % patch_grid_size
+            y_start = row * patch_h
+            y_end = (row + 1) * patch_h
+            x_start = col * patch_w
+            x_end = (col + 1) * patch_w
+            masked_frame[y_start:y_end, x_start:x_end] = frame[y_start:y_end, x_start:x_end]
+        
+        return masked_frame
+    
+    def create_mask_overlay(frame, unmask_indices, alpha=0.5):
+        """Create an overlay showing which patches are masked."""
+        overlay = frame.copy()
+        mask_color = np.array([1.0, 0.0, 0.0])  # Red for masked patches
+        
+        for patch_idx in range(total_patches):
+            if patch_idx not in unmask_indices:
+                row = patch_idx // patch_grid_size
+                col = patch_idx % patch_grid_size
+                y_start = row * patch_h
+                y_end = (row + 1) * patch_h
+                x_start = col * patch_w
+                x_end = (col + 1) * patch_w
+                overlay[y_start:y_end, x_start:x_end] = (
+                    alpha * mask_color + (1 - alpha) * overlay[y_start:y_end, x_start:x_end]
+                )
+        
+        return overlay
+    
+    # Generate mask indices
+    unmask_indices_0 = create_mask_indices(mask_ratio_cond, seed_offset=0)
+    unmask_indices_1 = create_mask_indices(mask_ratio_pred, seed_offset=1)
+    
+    # Apply masks
+    masked_frame0 = apply_patch_mask(frame0_np, unmask_indices_0)
+    masked_frame1 = apply_patch_mask(frame1_np, unmask_indices_1)
+    
+    # Create overlay views (red = masked)
+    overlay_frame0 = create_mask_overlay(frame0_np, unmask_indices_0)
+    overlay_frame1 = create_mask_overlay(frame1_np, unmask_indices_1)
+    
+    # Calculate statistics
+    n_visible_0 = len(unmask_indices_0)
+    n_visible_1 = len(unmask_indices_1)
+    pct_visible_0 = 100 * n_visible_0 / total_patches
+    pct_visible_1 = 100 * n_visible_1 / total_patches
+    
+    # Create figure
+    fig, axes = plt.subplots(2, 2, figsize=(12, 12))
+    
+    # Row 1: Original frames
+    axes[0, 0].imshow(np.clip(frame0_np, 0, 1))
+    axes[0, 0].set_title(f'Frame 0 (Original)\nFirst PSI frame', fontsize=12)
+    axes[0, 0].axis('off')
+    
+    axes[0, 1].imshow(np.clip(frame1_np, 0, 1))
+    axes[0, 1].set_title(f'Frame 1 (Original)\nSecond PSI frame', fontsize=12)
+    axes[0, 1].axis('off')
+    
+    # Row 2: Masked frames (with overlay showing masked regions in red)
+    axes[1, 0].imshow(np.clip(overlay_frame0, 0, 1))
+    axes[1, 0].set_title(f'Frame 0 Masked (mask_ratio={mask_ratio_cond})\n'
+                         f'{n_visible_0}/{total_patches} visible ({pct_visible_0:.1f}%)', fontsize=12)
+    axes[1, 0].axis('off')
+    
+    axes[1, 1].imshow(np.clip(overlay_frame1, 0, 1))
+    axes[1, 1].set_title(f'Frame 1 Masked (mask_ratio={mask_ratio_pred})\n'
+                         f'{n_visible_1}/{total_patches} visible ({pct_visible_1:.1f}%)', fontsize=12)
+    axes[1, 1].axis('off')
+    
+    plt.suptitle('PSI Control Frame Masking Visualization\n(Red = masked patches)', fontsize=14)
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"Saved masking visualization: {output_path}")
+    
+    plt.close()
+    
+    return fig
+
+
 # ==============================================================================
 # Main Script
 # ==============================================================================
@@ -197,16 +333,23 @@ def parse_args():
         default=default_video_path,
         help=f"Path to input video file (default: {default_video_path})"
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=seed,
+        help=f"Random seed for reproducibility (default: {seed})"
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     video_path = args.video_path
+    run_seed = args.seed  # Use seed from args for reproducibility
     
     # Set fixed random seed
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    torch.manual_seed(run_seed)
+    np.random.seed(run_seed)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = OmegaConf.load(config_path)
@@ -314,17 +457,17 @@ def main():
     print(f"Video path: {video_path}")
     print(f"Output size: {sample_size}")
     print(f"Video length: {video_length} frames")
-    print(f"Seed: {seed}")
+    print(f"Seed: {run_seed}")
     print("=" * 60)
 
-    generator = torch.Generator(device=device).manual_seed(seed)
+    generator = torch.Generator(device=device).manual_seed(run_seed)
 
     with torch.no_grad():
         # Adjust video length for VAE temporal compression
         actual_video_length = int((video_length - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if video_length != 1 else 1
 
-        # Load video frames
-        num_frames_to_load = max(psi_control_frame_offset + 1, actual_video_length)
+        # Load video frames - need enough frames to reach psi_start_frame + psi_control_frame_offset
+        num_frames_to_load = max(psi_start_frame + psi_control_frame_offset + 1, actual_video_length)
         full_control_video, original_fps = load_video_frames(
             video_path, 
             num_frames=num_frames_to_load,
@@ -335,18 +478,23 @@ def main():
         print(f"Loaded video shape: {full_control_video.shape}")
         print(f"Original video FPS: {original_fps}")
         
-        # Extract exactly 2 frames for PSI control: frame 0 and frame at offset
-        # full_control_video shape: (B, C, F, H, W)
-        frame_0 = full_control_video[:, :, 0:1, :, :]  # First frame
-        frame_offset = min(psi_control_frame_offset, full_control_video.shape[2] - 1)
-        frame_1 = full_control_video[:, :, frame_offset:frame_offset+1, :, :]  # Second frame
+        # Extract exactly 2 frames for PSI control at specified times
+        # Frame 1: at psi_start_frame (e.g., 1.0s = frame 30)
+        # Frame 2: at psi_start_frame + psi_control_frame_offset (e.g., 1.5s = frame 45)
+        first_frame_idx = min(psi_start_frame, full_control_video.shape[2] - 1)
+        second_frame_idx = min(psi_start_frame + psi_control_frame_offset, full_control_video.shape[2] - 1)
+        
+        frame_0 = full_control_video[:, :, first_frame_idx:first_frame_idx+1, :, :]  # First PSI frame
+        frame_1 = full_control_video[:, :, second_frame_idx:second_frame_idx+1, :, :]  # Second PSI frame
         psi_control_video = torch.cat([frame_0, frame_1], dim=2)  # (B, C, 2, H, W)
         
         # Compute PSI control parameters
-        psi_time_gap_sec = frame_offset / psi_source_fps
-        psi_second_latent_idx = 1 + (frame_offset - 1) // 4 if frame_offset > 0 else 0
+        # Time gap is between the two PSI frames (not from frame 0 of video)
+        psi_time_gap_sec = (second_frame_idx - first_frame_idx) / psi_source_fps
+        psi_second_latent_idx = 1 + (psi_control_frame_offset - 1) // 4 if psi_control_frame_offset > 0 else 0
         
-        print(f"PSI Control: frame 0 + frame {frame_offset} (time gap: {psi_time_gap_sec:.3f}s, latent idx: {psi_second_latent_idx})")
+        print(f"PSI Control: frame {first_frame_idx} ({first_frame_idx/psi_source_fps:.2f}s) + frame {second_frame_idx} ({second_frame_idx/psi_source_fps:.2f}s)")
+        print(f"  Time gap: {psi_time_gap_sec:.3f}s, latent idx: {psi_second_latent_idx}")
 
         # =====================================================================
         # Extract PSI decoded frames before pipeline for saving
@@ -365,16 +513,37 @@ def main():
         print(f"PSI decoded frames shape: {psi_decoded_frames.shape}")
         
         # =====================================================================
-        # Use first frame as reference image for CLIP
+        # Visualize PSI masking
         # =====================================================================
-        # Convert first frame to PIL for CLIP
-        first_frame_01 = full_control_video[0, :, 0]  # (C, H, W) in [0, 1]
-        clip_image = tensor_to_pil(first_frame_01)
+        # Create output directory early for visualization
+        if not os.path.exists(save_path):
+            os.makedirs(save_path, exist_ok=True)
         
-        # Prepare start_image tensor for the pipeline (first frame as reference)
+        # Get the two input frames for visualization (in [0, 1] range)
+        vis_frame0 = full_control_video[0, :, first_frame_idx]  # (C, H, W)
+        vis_frame1 = full_control_video[0, :, second_frame_idx]  # (C, H, W)
+        
+        # Visualize masking (same mask ratios as PSI extractor defaults)
+        mask_viz_path = os.path.join(save_path, "psi_masking_visualization.png")
+        visualize_psi_masking(
+            vis_frame0, vis_frame1,
+            mask_ratio_cond=0.0,  # Frame 0: fully visible
+            mask_ratio_pred=0.9,  # Frame 1: 90% masked
+            seed=run_seed,
+            output_path=mask_viz_path
+        )
+        
+        # =====================================================================
+        # Use first PSI frame as reference image for CLIP and start_image
+        # =====================================================================
+        # Convert first PSI frame to PIL for CLIP (at first_frame_idx, e.g., 1.0s)
+        first_psi_frame_01 = full_control_video[0, :, first_frame_idx]  # (C, H, W) in [0, 1]
+        clip_image = tensor_to_pil(first_psi_frame_01)
+        
+        # Prepare start_image tensor for the pipeline (first PSI frame as reference)
         # This matches training's control_ref mode where ref_latents_conv_in is added
         # In the pipeline, start_image becomes start_image_latentes_conv_in (same purpose)
-        start_image_tensor = full_control_video[:, :, 0:1, :, :]  # (B, C, 1, H, W)
+        start_image_tensor = full_control_video[:, :, first_frame_idx:first_frame_idx+1, :, :]  # (B, C, 1, H, W)
 
         print("=" * 60)
         print("Generating video...")
@@ -449,18 +618,18 @@ def main():
         psi_frame_pil.save(psi_frame_path)
         print(f"Saved PSI decoded frame {i}: {psi_frame_path}")
 
-    # 5. Save input frames (frame 0 and frame at offset)
-    input_frame0 = full_control_video[0, :, 0]  # (C, H, W) in [0, 1]
+    # 5. Save input frames (the two PSI control frames)
+    input_frame0 = full_control_video[0, :, first_frame_idx]  # (C, H, W) in [0, 1]
     input_frame0_pil = tensor_to_pil(input_frame0)
     input_frame0_path = os.path.join(save_path, f"{prefix}_input_frame0.png")
     input_frame0_pil.save(input_frame0_path)
-    print(f"Saved input frame 0: {input_frame0_path}")
+    print(f"Saved input frame 0 (frame {first_frame_idx}, {first_frame_idx/psi_source_fps:.2f}s): {input_frame0_path}")
     
-    input_frame1 = full_control_video[0, :, frame_offset]  # (C, H, W) in [0, 1]
+    input_frame1 = full_control_video[0, :, second_frame_idx]  # (C, H, W) in [0, 1]
     input_frame1_pil = tensor_to_pil(input_frame1)
     input_frame1_path = os.path.join(save_path, f"{prefix}_input_frame1.png")
     input_frame1_pil.save(input_frame1_path)
-    print(f"Saved input frame 1: {input_frame1_path}")
+    print(f"Saved input frame 1 (frame {second_frame_idx}, {second_frame_idx/psi_source_fps:.2f}s): {input_frame1_path}")
 
     print("=" * 60)
     print("Done!")
