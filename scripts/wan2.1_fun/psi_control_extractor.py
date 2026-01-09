@@ -288,7 +288,17 @@ class PSIControlFeatureExtractor(nn.Module):
             # Part 1: Process BOTH decoded frames (frame 0 and sampled second frame)
             # ==================================================================
             if len(decoded_frames_list) < 2:
-                print(f"[PSI GPU={self.device}] WARNING: Expected 2 decoded frames, got {len(decoded_frames_list)}. Skipping sample.")
+                # Debug logging only on failure
+                print(f"[PSI FAIL] Expected 2 decoded frames, got {len(decoded_frames_list)}")
+                print(f"[PSI FAIL] Output keys: {list(outputs.keys())}")
+                print(f"[PSI FAIL] Input: rgb_frames={len(rgb_frames)}, time_codes={time_codes}, prompt={prompt}")
+                for i, frame in enumerate(decoded_frames_list):
+                    frame_info = f"type={type(frame).__name__}"
+                    if hasattr(frame, 'shape'):
+                        frame_info += f", shape={frame.shape}"
+                    elif hasattr(frame, 'size'):
+                        frame_info += f", size={frame.size}"
+                    print(f"[PSI FAIL] decoded_frames_list[{i}]: {frame_info}")
                 return None
             
             # Process both frames
