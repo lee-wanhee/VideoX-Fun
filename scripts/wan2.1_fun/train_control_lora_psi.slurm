@@ -32,6 +32,17 @@ module load cudnn/cuda12/9.3.0.75
 source ~/.bashrc
 conda activate videox-fun
 
+# WandB API key (read from secure file, not in version control)
+# To set up: echo "your-api-key" > ~/.wandb_api_key && chmod 600 ~/.wandb_api_key
+if [ -f ~/.wandb_api_key ]; then
+    export WANDB_API_KEY=$(cat ~/.wandb_api_key)
+    export WANDB_RUN_NAME="stage1_lora64_lr1e5"
+    echo "WandB API key loaded from ~/.wandb_api_key"
+else
+    echo "WARNING: ~/.wandb_api_key not found. WandB logging may fail."
+    echo "To fix: echo 'your-api-key' > ~/.wandb_api_key && chmod 600 ~/.wandb_api_key"
+fi
+
 # Change to working directory
 cd /scratch/m000063/users/wanhee/VideoX-Fun
 
@@ -72,6 +83,7 @@ echo "Learning rate: 1e-5 (Stage 1)"
 echo "Max steps: 4800 (Stage 1)"
 echo "Checkpointing: every 1000 steps (~3 hours)"
 echo "Validation: DISABLED (run separately after training)"
+echo "Logging: WandB (long-range-prediction/wan-psi-control)"
 echo "Output dir: $OUTPUT_DIR"
 echo "=============================================="
 
@@ -126,6 +138,9 @@ srun --jobid=$SLURM_JOB_ID bash -c '
         --target_name="q,k,v,ffn.0,ffn.2" \
         --use_peft_lora \
         --enable_psi_control \
+        --report_to="wandb" \
+        --tracker_project_name="wan-psi-control" \
+        --tracker_entity="long-range-prediction" \
         --resume_from_checkpoint="latest"
 '
 
