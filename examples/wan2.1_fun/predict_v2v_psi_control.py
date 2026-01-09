@@ -52,10 +52,10 @@ GPU_memory_mode = "model_cpu_offload"
 config_path = "config/wan2.1/wan_civitai.yaml"
 model_name = "models/Wan2.1-Fun-1.3B-Control"  # Base model path
 
-# Trained checkpoint paths - UPDATE THESE
-lora_path = "output_psi_control_test/checkpoint-5000.safetensors"  # Path to trained LoRA checkpoint
-psi_projection_path = "output_psi_control_test/psi_projection-5000.safetensors"  # Path to trained PSI projection
-checkpoint_iteration = 5000  # Iteration number for output naming
+# Trained checkpoint paths - can be overridden by command line args
+default_lora_path = None  # Path to trained LoRA checkpoint
+default_psi_projection_path = None  # Path to trained PSI projection
+default_checkpoint_name = "none"  # Name for output folder (e.g., "output_psi_control_test-5000")
 
 # PSI Control Extractor config (same as training)
 psi_control_extractor_config = {
@@ -90,8 +90,8 @@ seed = 42  # Fixed random seed
 num_inference_steps = 50
 lora_weight = 1.0
 
-# Output - includes model name and iteration for tracking
-save_path = f"samples/psi-control-output/output_psi_control_test-{checkpoint_iteration}"
+# Output - will be set based on checkpoint_name arg
+default_save_path = "samples/psi-control-output"
 
 # Use torch.float16 if GPU does not support torch.bfloat16
 weight_dtype = torch.bfloat16
@@ -321,6 +321,91 @@ def visualize_psi_masking(frame0, frame1, mask_ratio_cond=0.0, mask_ratio_pred=0
     return fig
 
 
+def visualize_gt_vs_pred(gt_frame0, gt_frame1, pred_frame0, pred_frame1, 
+                         frame0_info="", frame1_info="", output_path=None):
+    """Visualize GT vs Predicted frames comparison.
+    
+    Creates a 2x2 plot showing:
+    - Row 1: GT_frame0, GT_frame1
+    - Row 2: pred_frame0, pred_frame1
+    
+    Args:
+        gt_frame0: Ground truth first frame tensor (C, H, W) in [0, 1] range
+        gt_frame1: Ground truth second frame tensor (C, H, W) in [0, 1] range
+        pred_frame0: Predicted first frame tensor (C, H, W) in [0, 1] range
+        pred_frame1: Predicted second frame tensor (C, H, W) in [0, 1] range
+        frame0_info: Additional info string for frame 0
+        frame1_info: Additional info string for frame 1
+        output_path: Path to save the figure
+    """
+    def to_numpy(tensor):
+        if isinstance(tensor, torch.Tensor):
+            tensor = tensor.float().cpu()
+            if tensor.dim() == 3 and tensor.shape[0] == 3:
+                tensor = tensor.permute(1, 2, 0)  # (C, H, W) -> (H, W, C)
+            return tensor.numpy()
+        return tensor
+    
+    gt0_np = to_numpy(gt_frame0)
+    gt1_np = to_numpy(gt_frame1)
+    pred0_np = to_numpy(pred_frame0)
+    pred1_np = to_numpy(pred_frame1)
+    
+    # Create figure
+    fig, axes = plt.subplots(2, 2, figsize=(12, 12))
+    
+    # Row 1: GT frames
+    axes[0, 0].imshow(np.clip(gt0_np, 0, 1))
+    axes[0, 0].set_title(f'GT Frame 0\n{frame0_info}', fontsize=12)
+    axes[0, 0].axis('off')
+    
+    axes[0, 1].imshow(np.clip(gt1_np, 0, 1))
+    axes[0, 1].set_title(f'GT Frame 1\n{frame1_info}', fontsize=12)
+    axes[0, 1].axis('off')
+    
+    # Row 2: Predicted frames
+    axes[1, 0].imshow(np.clip(pred0_np, 0, 1))
+    axes[1, 0].set_title(f'Predicted Frame 0\n(Generated video frame 0)', fontsize=12)
+    axes[1, 0].axis('off')
+    
+    axes[1, 1].imshow(np.clip(pred1_np, 0, 1))
+    axes[1, 1].set_title(f'Predicted Frame 1\n{frame1_info}', fontsize=12)
+    axes[1, 1].axis('off')
+    
+    plt.suptitle('Ground Truth vs Predicted Frames Comparison', fontsize=14)
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"Saved GT vs Pred visualization: {output_path}")
+    
+    plt.close()
+    
+    return fig
+
+
+def get_video_frame_from_latent_idx(latent_idx):
+    """Convert latent frame index to video frame index.
+    
+    With VAE temporal compression ratio of 4:
+    - Latent 0 -> Video frame 0
+    - Latent 1 -> Video frame 1
+    - Latent 2 -> Video frame 5
+    - Latent 3 -> Video frame 9
+    - Latent L (L >= 1) -> Video frame 1 + 4*(L-1) = 4*L - 3
+    
+    Args:
+        latent_idx: Index in latent space
+        
+    Returns:
+        video_frame_idx: Corresponding video frame index
+    """
+    if latent_idx == 0:
+        return 0
+    else:
+        return 1 + 4 * (latent_idx - 1)
+
+
 # ==============================================================================
 # Main Script
 # ==============================================================================
@@ -334,10 +419,34 @@ def parse_args():
         help=f"Path to input video file (default: {default_video_path})"
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=seed,
-        help=f"Random seed for reproducibility (default: {seed})"
+        "--seeds",
+        type=str,
+        default=str(seed),
+        help=f"Comma-separated seeds for multiple runs (default: {seed}). E.g., '42,123,456'"
+    )
+    parser.add_argument(
+        "--lora_path",
+        type=str,
+        default=default_lora_path,
+        help="Path to trained LoRA checkpoint (.safetensors). None for no LoRA."
+    )
+    parser.add_argument(
+        "--psi_projection_path",
+        type=str,
+        default=default_psi_projection_path,
+        help="Path to trained PSI projection (.safetensors). None for random init."
+    )
+    parser.add_argument(
+        "--checkpoint_name",
+        type=str,
+        default=default_checkpoint_name,
+        help="Name for output folder (e.g., 'output_psi_control_test-5000' or 'none' for baseline)"
+    )
+    parser.add_argument(
+        "--save_path",
+        type=str,
+        default=default_save_path,
+        help=f"Base path for saving outputs (default: {default_save_path})"
     )
     return parser.parse_args()
 
@@ -345,14 +454,26 @@ def parse_args():
 def main():
     args = parse_args()
     video_path = args.video_path
-    run_seed = args.seed  # Use seed from args for reproducibility
     
-    # Set fixed random seed
-    torch.manual_seed(run_seed)
-    np.random.seed(run_seed)
+    # Parse seeds (comma-separated)
+    run_seeds = [int(s.strip()) for s in args.seeds.split(',')]
+    
+    run_lora_path = args.lora_path
+    run_psi_projection_path = args.psi_projection_path
+    run_checkpoint_name = args.checkpoint_name
+    run_save_path = os.path.join(args.save_path, run_checkpoint_name)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = OmegaConf.load(config_path)
+    
+    print("=" * 60)
+    print("Checkpoint Configuration:")
+    print(f"  LoRA path: {run_lora_path}")
+    print(f"  PSI projection path: {run_psi_projection_path}")
+    print(f"  Checkpoint name: {run_checkpoint_name}")
+    print(f"  Output path: {run_save_path}")
+    print(f"  Seeds: {run_seeds} ({len(run_seeds)} runs)")
+    print("=" * 60)
 
     print("=" * 60)
     print("Loading models...")
@@ -411,12 +532,12 @@ def main():
         n_output_channels=16
     ).to(weight_dtype)
     
-    if psi_projection_path is not None and os.path.exists(psi_projection_path):
-        print(f"Loading trained PSI projection from: {psi_projection_path}")
-        psi_state_dict = load_file(psi_projection_path)
+    if run_psi_projection_path is not None and os.path.exists(run_psi_projection_path):
+        print(f"Loading trained PSI projection from: {run_psi_projection_path}")
+        psi_state_dict = load_file(run_psi_projection_path)
         psi_projection.load_state_dict(psi_state_dict)
     else:
-        print("WARNING: No trained PSI projection path provided. Using random initialization.")
+        print("INFO: No trained PSI projection path provided. Using random initialization.")
     psi_projection = psi_projection.eval()
 
     # Load Scheduler
@@ -445,11 +566,11 @@ def main():
         pipeline.to(device=device)
 
     # Merge LoRA if provided
-    if lora_path is not None and os.path.exists(lora_path):
-        print(f"Merging LoRA from: {lora_path}")
-        pipeline = merge_lora(pipeline, lora_path, lora_weight, device=device, dtype=weight_dtype)
+    if run_lora_path is not None and os.path.exists(run_lora_path):
+        print(f"Merging LoRA from: {run_lora_path}")
+        pipeline = merge_lora(pipeline, run_lora_path, lora_weight, device=device, dtype=weight_dtype)
     else:
-        print("WARNING: No LoRA path provided. Using base model weights.")
+        print("INFO: No LoRA path provided. Using base model weights.")
 
     print("=" * 60)
     print("Loading input video...")
@@ -457,10 +578,8 @@ def main():
     print(f"Video path: {video_path}")
     print(f"Output size: {sample_size}")
     print(f"Video length: {video_length} frames")
-    print(f"Seed: {run_seed}")
+    print(f"Seeds: {run_seeds}")
     print("=" * 60)
-
-    generator = torch.Generator(device=device).manual_seed(run_seed)
 
     with torch.no_grad():
         # Adjust video length for VAE temporal compression
@@ -513,23 +632,23 @@ def main():
         print(f"PSI decoded frames shape: {psi_decoded_frames.shape}")
         
         # =====================================================================
-        # Visualize PSI masking
+        # Visualize PSI masking (once, using first seed)
         # =====================================================================
         # Create output directory early for visualization
-        if not os.path.exists(save_path):
-            os.makedirs(save_path, exist_ok=True)
+        if not os.path.exists(run_save_path):
+            os.makedirs(run_save_path, exist_ok=True)
         
         # Get the two input frames for visualization (in [0, 1] range)
         vis_frame0 = full_control_video[0, :, first_frame_idx]  # (C, H, W)
         vis_frame1 = full_control_video[0, :, second_frame_idx]  # (C, H, W)
         
         # Visualize masking (same mask ratios as PSI extractor defaults)
-        mask_viz_path = os.path.join(save_path, "psi_masking_visualization.png")
+        mask_viz_path = os.path.join(run_save_path, "psi_masking_visualization.png")
         visualize_psi_masking(
             vis_frame0, vis_frame1,
             mask_ratio_cond=0.0,  # Frame 0: fully visible
             mask_ratio_pred=0.9,  # Frame 1: 90% masked
-            seed=run_seed,
+            seed=run_seeds[0],  # Use first seed for visualization
             output_path=mask_viz_path
         )
         
@@ -545,103 +664,137 @@ def main():
         # In the pipeline, start_image becomes start_image_latentes_conv_in (same purpose)
         start_image_tensor = full_control_video[:, :, first_frame_idx:first_frame_idx+1, :, :]  # (B, C, 1, H, W)
 
-        print("=" * 60)
-        print("Generating video...")
-        print("=" * 60)
-        print(f"Prompt: {prompt}")
-        print("=" * 60)
+        # =====================================================================
+        # Loop through seeds for generation
+        # =====================================================================
+        for seed_idx, run_seed in enumerate(run_seeds):
+            print("=" * 60)
+            print(f"Generating video [{seed_idx + 1}/{len(run_seeds)}] with seed={run_seed}")
+            print("=" * 60)
+            print(f"Prompt: {prompt}")
+            print("=" * 60)
+            
+            # Set seed for this run
+            torch.manual_seed(run_seed)
+            np.random.seed(run_seed)
+            generator = torch.Generator(device=device).manual_seed(run_seed)
 
-        # Generate video
-        # start_image is concatenated with PSI control latents on channel dimension (matching training)
-        # PSI control: 16ch + start_image: 16ch = 32ch total (matches training)
-        # clip_image is used for CLIP conditioning
-        sample = pipeline(
-            prompt,
-            num_frames=actual_video_length,
-            negative_prompt=negative_prompt,
-            height=sample_size[0],
-            width=sample_size[1],
-            generator=generator,
-            guidance_scale=guidance_scale,
-            num_inference_steps=num_inference_steps,
-            control_video=psi_control_video,  # 2-frame control video
-            psi_time_gap_sec=psi_time_gap_sec,  # Time gap between frames
-            psi_second_latent_idx=psi_second_latent_idx,  # Latent index for second frame
-            start_image=start_image_tensor,  # First frame as reference (matching training's ref_latents_conv_in)
-            clip_image=clip_image,  # First frame used for CLIP conditioning
-        ).videos
+            # Generate video
+            # start_image is concatenated with PSI control latents on channel dimension (matching training)
+            # PSI control: 16ch + start_image: 16ch = 32ch total (matches training)
+            # clip_image is used for CLIP conditioning
+            sample = pipeline(
+                prompt,
+                num_frames=actual_video_length,
+                negative_prompt=negative_prompt,
+                height=sample_size[0],
+                width=sample_size[1],
+                generator=generator,
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps,
+                control_video=psi_control_video,  # 2-frame control video
+                psi_time_gap_sec=psi_time_gap_sec,  # Time gap between frames
+                psi_second_latent_idx=psi_second_latent_idx,  # Latent index for second frame
+                start_image=start_image_tensor,  # First frame as reference (matching training's ref_latents_conv_in)
+                clip_image=clip_image,  # First frame used for CLIP conditioning
+            ).videos
 
-    # =========================================================================
-    # Save all outputs
-    # =========================================================================
-    if not os.path.exists(save_path):
-        os.makedirs(save_path, exist_ok=True)
+            # =========================================================================
+            # Save all outputs for this seed
+            # =========================================================================
+            prefix = f"seed{run_seed:05d}"
+            
+            print(f"Saving outputs with prefix: {prefix}")
+            
+            # 1. Save generated video
+            if actual_video_length == 1:
+                output_path = os.path.join(run_save_path, f"{prefix}_generated.png")
+                image = sample[0, :, 0]
+                image = image.transpose(0, 1).transpose(1, 2)
+                image = (image * 255).numpy().astype(np.uint8)
+                image = Image.fromarray(image)
+                image.save(output_path)
+                print(f"Saved generated image: {output_path}")
+            else:
+                output_path = os.path.join(run_save_path, f"{prefix}_generated.mp4")
+                save_videos_grid(sample, output_path, fps=output_fps)
+                print(f"Saved generated video: {output_path}")
+            
+            # 2. Save control video
+            control_video_path = os.path.join(run_save_path, f"{prefix}_control_video.mp4")
+            save_video_from_tensor(full_control_video, control_video_path, fps=output_fps)
+            print(f"Saved control video: {control_video_path}")
 
-    # Count existing outputs to get next index
-    existing_files = [f for f in os.listdir(save_path) if f.endswith('_generated.mp4')]
-    index = len(existing_files) + 1
-    prefix = str(index).zfill(4)
-    
+            # 3. Save reference image (first frame)
+            ref_image_path = os.path.join(run_save_path, f"{prefix}_ref_image.png")
+            clip_image.save(ref_image_path)
+            print(f"Saved reference image: {ref_image_path}")
+
+            # 4. Save PSI decoded frames
+            for i in range(psi_decoded_frames.shape[1]):
+                psi_frame = psi_decoded_frames[0, i]  # (C, H, W) in [-1, 1]
+                psi_frame_pil = tensor_to_pil(psi_frame)
+                psi_frame_path = os.path.join(run_save_path, f"{prefix}_psi_decoded_frame{i}.png")
+                psi_frame_pil.save(psi_frame_path)
+                print(f"Saved PSI decoded frame {i}: {psi_frame_path}")
+
+            # 5. Save input frames (the two PSI control frames)
+            input_frame0 = full_control_video[0, :, first_frame_idx]  # (C, H, W) in [0, 1]
+            input_frame0_pil = tensor_to_pil(input_frame0)
+            input_frame0_path = os.path.join(run_save_path, f"{prefix}_input_frame0.png")
+            input_frame0_pil.save(input_frame0_path)
+            print(f"Saved input frame 0: {input_frame0_path}")
+            
+            input_frame1 = full_control_video[0, :, second_frame_idx]  # (C, H, W) in [0, 1]
+            input_frame1_pil = tensor_to_pil(input_frame1)
+            input_frame1_path = os.path.join(run_save_path, f"{prefix}_input_frame1.png")
+            input_frame1_pil.save(input_frame1_path)
+            print(f"Saved input frame 1: {input_frame1_path}")
+            
+            # 6. Extract predicted frames from generated video and save comparison
+            # sample shape: (B, C, F, H, W)
+            # pred_frame0 corresponds to video frame 0 (latent idx 0)
+            # pred_frame1 corresponds to the video frame at psi_second_latent_idx
+            pred_video_frame1_idx = get_video_frame_from_latent_idx(psi_second_latent_idx)
+            pred_video_frame1_idx = min(pred_video_frame1_idx, sample.shape[2] - 1)  # Clamp to valid range
+            
+            pred_frame0 = sample[0, :, 0]  # (C, H, W) - first frame of generated video
+            pred_frame1 = sample[0, :, pred_video_frame1_idx]  # (C, H, W) - frame at psi_second_latent_idx
+            
+            # Save predicted frame 1 (corresponding to GT frame 1)
+            pred_frame1_pil = tensor_to_pil(pred_frame1)
+            pred_frame1_path = os.path.join(run_save_path, f"{prefix}_pred_frame1.png")
+            pred_frame1_pil.save(pred_frame1_path)
+            print(f"Saved pred frame 1 (video frame {pred_video_frame1_idx}): {pred_frame1_path}")
+            
+            # 7. Create GT vs Pred comparison visualization
+            gt_vs_pred_path = os.path.join(run_save_path, f"{prefix}_gt_vs_pred.png")
+            visualize_gt_vs_pred(
+                gt_frame0=input_frame0,
+                gt_frame1=input_frame1,
+                pred_frame0=pred_frame0,
+                pred_frame1=pred_frame1,
+                frame0_info=f"(source frame {first_frame_idx})",
+                frame1_info=f"(video frame {pred_video_frame1_idx}, latent {psi_second_latent_idx})",
+                output_path=gt_vs_pred_path
+            )
+            
+            print("")
+
     print("=" * 60)
-    print(f"Saving outputs with prefix: {prefix}")
+    print("All done!")
     print("=" * 60)
-    
-    # 1. Save generated video
-    if actual_video_length == 1:
-        output_path = os.path.join(save_path, f"{prefix}_generated.png")
-        image = sample[0, :, 0]
-        image = image.transpose(0, 1).transpose(1, 2)
-        image = (image * 255).numpy().astype(np.uint8)
-        image = Image.fromarray(image)
-        image.save(output_path)
-        print(f"Saved generated image: {output_path}")
-    else:
-        output_path = os.path.join(save_path, f"{prefix}_generated.mp4")
-        save_videos_grid(sample, output_path, fps=output_fps)
-        print(f"Saved generated video: {output_path}")
-
-    # 2. Save control video
-    control_video_path = os.path.join(save_path, f"{prefix}_control_video.mp4")
-    save_video_from_tensor(full_control_video, control_video_path, fps=output_fps)
-    print(f"Saved control video: {control_video_path}")
-
-    # 3. Save reference image (first frame)
-    ref_image_path = os.path.join(save_path, f"{prefix}_ref_image.png")
-    clip_image.save(ref_image_path)
-    print(f"Saved reference image: {ref_image_path}")
-
-    # 4. Save PSI decoded frames
-    for i in range(psi_decoded_frames.shape[1]):
-        psi_frame = psi_decoded_frames[0, i]  # (C, H, W) in [-1, 1]
-        psi_frame_pil = tensor_to_pil(psi_frame)
-        psi_frame_path = os.path.join(save_path, f"{prefix}_psi_decoded_frame{i}.png")
-        psi_frame_pil.save(psi_frame_path)
-        print(f"Saved PSI decoded frame {i}: {psi_frame_path}")
-
-    # 5. Save input frames (the two PSI control frames)
-    input_frame0 = full_control_video[0, :, first_frame_idx]  # (C, H, W) in [0, 1]
-    input_frame0_pil = tensor_to_pil(input_frame0)
-    input_frame0_path = os.path.join(save_path, f"{prefix}_input_frame0.png")
-    input_frame0_pil.save(input_frame0_path)
-    print(f"Saved input frame 0 (frame {first_frame_idx}, {first_frame_idx/psi_source_fps:.2f}s): {input_frame0_path}")
-    
-    input_frame1 = full_control_video[0, :, second_frame_idx]  # (C, H, W) in [0, 1]
-    input_frame1_pil = tensor_to_pil(input_frame1)
-    input_frame1_path = os.path.join(save_path, f"{prefix}_input_frame1.png")
-    input_frame1_pil.save(input_frame1_path)
-    print(f"Saved input frame 1 (frame {second_frame_idx}, {second_frame_idx/psi_source_fps:.2f}s): {input_frame1_path}")
-
-    print("=" * 60)
-    print("Done!")
-    print("=" * 60)
-    print(f"\nOutput files in {save_path}:")
-    print(f"  {prefix}_generated.mp4       - Generated video")
-    print(f"  {prefix}_control_video.mp4   - Input control video")
-    print(f"  {prefix}_ref_image.png       - Reference image (first frame)")
-    print(f"  {prefix}_psi_decoded_frame0.png - PSI decoded first frame")
-    print(f"  {prefix}_psi_decoded_frame1.png - PSI decoded second frame")
-    print(f"  {prefix}_input_frame0.png    - Original input frame 0")
-    print(f"  {prefix}_input_frame1.png    - Original input frame 1")
+    print(f"\nOutput files in {run_save_path}:")
+    print(f"  seed*_generated.mp4          - Generated videos")
+    print(f"  seed*_control_video.mp4      - Input control video")
+    print(f"  seed*_ref_image.png          - Reference image")
+    print(f"  seed*_psi_decoded_frame0.png - PSI decoded first frame")
+    print(f"  seed*_psi_decoded_frame1.png - PSI decoded second frame")
+    print(f"  seed*_input_frame0.png       - Original input frame 0 (GT)")
+    print(f"  seed*_input_frame1.png       - Original input frame 1 (GT)")
+    print(f"  seed*_pred_frame1.png        - Predicted frame 1 from generated video")
+    print(f"  seed*_gt_vs_pred.png         - GT vs Predicted comparison plot")
+    print(f"  psi_masking_visualization.png - Masking visualization")
     print("=" * 60)
 
 
