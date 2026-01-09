@@ -153,3 +153,4 @@ srun --export=ALL --jobid=$SLURM_JOB_ID bash -c '
 '
 
 # started the first training at 10pm on 2026-01-07
+# started the second trial at 5pm on 2026-01-08
