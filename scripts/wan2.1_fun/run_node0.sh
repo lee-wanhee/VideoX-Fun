@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # Multi-Node Training - Node 0 (Master)
-# Run this on n07
+# Run this on n22
 # ==============================================================================
 
 # Load required modules
@@ -36,8 +36,15 @@ export MODEL_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/models/Wan2.1-Fun-1.
 export DATASET_NAME="/scratch/m000063/data/bvd2/kinetics700"
 export DATASET_META_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/kinetics700_49f.csv"
 
-# Output directory with timestamp
-export OUTPUT_DIR="/scratch/m000063/users/wanhee/VideoX-Fun/output_psi_control_test"
+# Output directory with timestamp (similar to SLURM job behavior)
+# Node 0 generates the timestamp and writes it to a shared file for Node 1 to read
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+export OUTPUT_DIR="/scratch/m000063/users/wanhee/VideoX-Fun/output_psi_control_${TIMESTAMP}"
+
+# Write timestamp to shared file for other nodes
+mkdir -p /scratch/m000063/users/wanhee/VideoX-Fun/.run_sync
+echo "$TIMESTAMP" > /scratch/m000063/users/wanhee/VideoX-Fun/.run_sync/current_timestamp
+echo "Wrote timestamp to sync file: $TIMESTAMP"
 
 # NCCL settings for multi-node
 export NCCL_DEBUG=INFO
@@ -45,12 +52,12 @@ export NCCL_IB_DISABLE=0
 export NCCL_NET_GDR_LEVEL=2
 
 # Multi-node configuration
-export MASTER_ADDR=n07
+export MASTER_ADDR=n22
 export MASTER_PORT=45678
 export NODE_RANK=0
 
 NNODES=2
-GPUS_PER_NODE=2
+GPUS_PER_NODE=8
 WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 
 echo "=============================================="
@@ -58,10 +65,10 @@ echo "Training Configuration:"
 echo "=============================================="
 echo "MASTER_ADDR: $MASTER_ADDR"
 echo "MASTER_PORT: $MASTER_PORT"
-echo "WORLD_SIZE: $WORLD_SIZE (2 nodes × 2 GPUs)"
+echo "WORLD_SIZE: $WORLD_SIZE (2 nodes × 8 GPUs)"
 echo "NNODES: $NNODES"
 echo "NODE_RANK: $NODE_RANK"
-echo "Effective batch size: 16 (1 × 4 grad_accum × 4 GPUs)"
+echo "Effective batch size: 128 (1 × 8 grad_accum × 16 GPUs)"
 echo "Learning rate: 1e-5 (Stage 1)"
 echo "Max steps: 5000"
 echo "Checkpointing: every 1000 steps"
@@ -90,7 +97,7 @@ accelerate launch \
     --video_sample_n_frames=49 \
     --train_batch_size=1 \
     --video_repeat=1 \
-    --gradient_accumulation_steps=4 \
+    --gradient_accumulation_steps=8 \
     --dataloader_num_workers=8 \
     --max_train_steps=5000 \
     --checkpointing_steps=1000 \
