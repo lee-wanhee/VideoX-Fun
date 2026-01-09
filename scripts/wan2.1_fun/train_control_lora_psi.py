@@ -1843,6 +1843,12 @@ def main():
                             
                             # 1. Get PSI features and decoded frames (no grad - extractor is frozen)
                             psi_outputs = psi_control_extractor(control_pixel_values, time_gap_sec=time_gap_sec)
+                            
+                            # Skip batch if PSI extraction failed (e.g., not enough decoded frames)
+                            if psi_outputs is None:
+                                print(f"[Rank {accelerator.process_index}] Skipping batch due to PSI extraction failure")
+                                continue
+                            
                             decoded_frames = psi_outputs['decoded_frames']  # (B, 2, C, H, W) - both frames
                             psi_semantic_features = psi_outputs['semantic_features']  # (B, 2, 8192, 32, 32)
                             

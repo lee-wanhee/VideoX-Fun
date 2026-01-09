@@ -288,7 +288,8 @@ class PSIControlFeatureExtractor(nn.Module):
             # Part 1: Process BOTH decoded frames (frame 0 and sampled second frame)
             # ==================================================================
             if len(decoded_frames_list) < 2:
-                raise ValueError(f"Expected at least 2 decoded frames, got {len(decoded_frames_list)}")
+                print(f"[PSI GPU={self.device}] WARNING: Expected 2 decoded frames, got {len(decoded_frames_list)}. Skipping sample.")
+                return None
             
             # Process both frames
             from PIL import Image as PILImage
