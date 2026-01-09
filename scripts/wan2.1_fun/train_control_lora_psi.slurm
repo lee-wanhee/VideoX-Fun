@@ -89,10 +89,18 @@ echo "Output dir: $OUTPUT_DIR"
 echo "=============================================="
 
 # Run with srun + accelerate
-srun --jobid=$SLURM_JOB_ID bash -c '
+srun --export=ALL --jobid=$SLURM_JOB_ID bash -c '
     source /scratch/m000063/users/wanhee/miniconda3/etc/profile.d/conda.sh
     conda activate videox-fun
     cd /scratch/m000063/users/wanhee/VideoX-Fun
+    
+    # WandB config (must be set inside srun subshell)
+    if [ -f ~/.wandb_api_key ]; then
+        export WANDB_API_KEY=$(cat ~/.wandb_api_key)
+    fi
+    export WANDB_ENTITY="long-range-prediction"
+    export WANDB_RUN_NAME="stage1_lora64_lr1e5"
+    
     export NODE_RANK=$SLURM_NODEID
     accelerate launch \
         --multi_gpu \
