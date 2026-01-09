@@ -125,7 +125,7 @@ srun --export=ALL --jobid=$SLURM_JOB_ID bash -c '
         --video_repeat=1 \
         --gradient_accumulation_steps=4 \
         --dataloader_num_workers=8 \
-        --max_train_steps=5000 \
+        --max_train_steps=20000 \
         --checkpointing_steps=1000 \
         --learning_rate=1e-05 \
         --seed=42 \
