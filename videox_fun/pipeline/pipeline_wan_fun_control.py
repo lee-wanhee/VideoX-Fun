@@ -664,12 +664,33 @@ class WanFunControlPipeline(DiffusionPipeline):
             
             B, num_psi_frames, C, H, W = decoded_frames.shape
             
-            # 2. VAE encode BOTH decoded frames
-            # decoded_frames: (B, 2, C, H, W) -> need (B*2, C, 1, H, W) for VAE
-            decoded_frames_flat = decoded_frames.view(B * num_psi_frames, C, H, W).unsqueeze(2)  # (B*2, C, 1, H, W)
-            control_latents_flat = self.vae.encode(decoded_frames_flat)[0].sample()  # (B*2, C_latent, 1, H', W')
-            _, C_latent, _, H_latent, W_latent = control_latents_flat.shape
-            control_latents_base = control_latents_flat.view(B, num_psi_frames, C_latent, H_latent, W_latent)  # (B, 2, C_latent, H', W')
+            # 2. VAE encode EACH decoded frame separately (VAE temporal compression doesn't work for t=2)
+            # Encode frame by frame to avoid VAE's temporal compression issue with short sequences
+            control_latents_list = []
+            for frame_idx in range(num_psi_frames):
+                # Get single frame: (B, C, H, W) -> (B, C, 1, H, W)
+                single_frame = decoded_frames[:, frame_idx, :, :, :].unsqueeze(2)  # (B, C, 1, H, W)
+                # Match non-PSI path: use float32 then prepare_control_latents converts to weight_dtype
+                single_frame = single_frame.to(device=device, dtype=torch.float32)
+                
+                # Encode using prepare_control_latents for proper CPU offload handling
+                _, frame_latent = self.prepare_control_latents(
+                    None,
+                    single_frame,
+                    batch_size,
+                    height,
+                    width,
+                    weight_dtype,
+                    device,
+                    generator,
+                    do_classifier_free_guidance=False
+                )
+                # frame_latent: (B, C_latent, 1, H', W') -> squeeze temporal dim
+                control_latents_list.append(frame_latent.squeeze(2))  # (B, C_latent, H', W')
+            
+            # Stack latents: (B, 2, C_latent, H', W')
+            control_latents_base = torch.stack(control_latents_list, dim=1)
+            _, _, C_latent, H_latent, W_latent = control_latents_base.shape
             
             # 3. Project PSI features for BOTH frames (also get mask embedding)
             psi_semantic_flat = psi_semantic_features.view(B * num_psi_frames, -1, 32, 32)
@@ -711,6 +732,10 @@ class WanFunControlPipeline(DiffusionPipeline):
                     control_latents_base[bs_idx, 1, :, :, :] +
                     psi_projected[bs_idx, 1, :, :, :]
                 )
+            
+            # Note: ref_image for control_ref mode should be passed as start_image parameter
+            # The pipeline's start_image_latentes_conv_in handling is equivalent to training's ref_latents_conv_in
+            # This keeps PSI control as 16 channels, and start_image adds another 16 channels = 32 total
             
             control_camera_latents = None
         elif control_video is not None:
@@ -791,7 +816,8 @@ class WanFunControlPipeline(DiffusionPipeline):
                 ref_image_latentes = torch.zeros_like(latents)[:, :, 0]
         else:
             if ref_image is not None:
-                raise ValueError("The add_ref_conv is False, but ref_image is not None")
+                raise ValueError("The add_ref_conv is False, but ref_image is not None. "
+                                 "For control_ref mode, pass the reference image as start_image instead.")
             else:
                 ref_image_latentes = None
 
