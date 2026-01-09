@@ -17,6 +17,7 @@ conda activate videox-fun
 # To set up: echo "your-api-key" > ~/.wandb_api_key && chmod 600 ~/.wandb_api_key
 if [ -f ~/.wandb_api_key ]; then
     export WANDB_API_KEY=$(cat ~/.wandb_api_key)
+    export WANDB_ENTITY="long-range-prediction"
     export WANDB_RUN_NAME="stage1_lora64_lr1e5"
     echo "WandB API key loaded from ~/.wandb_api_key"
 else
@@ -115,6 +116,5 @@ accelerate launch \
     --enable_psi_control \
     --report_to="wandb" \
     --tracker_project_name="wan-psi-control" \
-    --tracker_entity="long-range-prediction" \
     --resume_from_checkpoint="latest"
 
