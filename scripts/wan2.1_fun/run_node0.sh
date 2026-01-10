@@ -99,7 +99,7 @@ accelerate launch \
     --video_repeat=1 \
     --gradient_accumulation_steps=8 \
     --dataloader_num_workers=8 \
-    --max_train_steps=5000 \
+    --max_train_steps=20000 \
     --checkpointing_steps=1000 \
     --learning_rate=1e-05 \
     --seed=42 \
