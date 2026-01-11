@@ -146,5 +146,5 @@ accelerate launch \
     --enable_psi_control \
     --psi_vae_only \
     --report_to="wandb" \
-    --tracker_project_name="wan-psi-ablation"
+    --tracker_project_name="wan-psi-control"
 

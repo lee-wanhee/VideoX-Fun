@@ -145,5 +145,5 @@ accelerate launch \
     --psi_fix_masking_seed=42 \
     --psi_fix_order_seed=42 \
     --report_to="wandb" \
-    --tracker_project_name="wan-psi-ablation"
+    --tracker_project_name="wan-psi-control"
 
