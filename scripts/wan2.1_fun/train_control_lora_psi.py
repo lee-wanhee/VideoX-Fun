@@ -671,6 +671,11 @@ def parse_args():
         "--psi_vae_only", action="store_true",
         help="If set, only use VAE-encoded PSI decoded frames without PSI semantic projection."
     )
+    parser.add_argument(
+        "--psi_use_all_tokens", action="store_true",
+        help="If set, use all 4 content tokens per patch for PSI feature extraction (4x more features, better decoded frames). "
+             "Feature dim: 32768 instead of 8192. Requires different projection layer input size."
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -849,6 +854,7 @@ def main():
                 'flow_quantizer_name': "HLQ-flow-nq2-gen2_0-wavelet-small-bs512-lr1e-4-l2-coarsel21e-2-fg_v1_5/model_best.pt",
                 'depth_quantizer_name': "HLQ-depth-nq2-gen2_0-wavelet-small-bs512-lr1e-4-l1-dinov21e0224-coarsel11e-2-200k_ft500k_3/model_best.pt",
                 'spatial_compression': 8,
+                'use_all_tokens': args.psi_use_all_tokens,  # Use all 4 content tokens per patch if enabled
             }
             psi_control_extractor = PSIControlFeatureExtractor.from_pretrained(psi_control_extractor_config)
             psi_control_extractor = psi_control_extractor.eval()
@@ -856,7 +862,16 @@ def main():
             psi_control_extractor = None
     # Get PSI Projection
     if args.enable_psi_control:
-        psi_projection = PSIProjectionSwiGLU(n_input_channels=8192, n_hidden_channels=256, n_output_channels=16).to(weight_dtype)
+        # Use dynamic feature dimension based on extraction mode
+        # Coarse mode: 8192 (4096 hidden + 4096 embeddings)
+        # All tokens mode: 32768 (4 * (4096 hidden + 4096 embeddings))
+        psi_feature_dim = psi_control_extractor.feature_dim
+        psi_projection = PSIProjectionSwiGLU(
+            n_input_channels=psi_feature_dim, 
+            n_hidden_channels=256, 
+            n_output_channels=16
+        ).to(weight_dtype)
+        print(f"PSI Projection initialized with input_channels={psi_feature_dim} (use_all_tokens={args.psi_use_all_tokens})")
     else:
         psi_projection = None
     # Get Transformer
@@ -1071,14 +1086,16 @@ def main():
         logging.info("Add peft parameters")
         trainable_params = list(filter(lambda p: p.requires_grad, transformer3d.parameters()))
         trainable_params_optim = list(filter(lambda p: p.requires_grad, transformer3d.parameters()))
-        if args.enable_psi_control:
+        if args.enable_psi_control and not args.psi_vae_only:
+            # Only add PSI projection to trainable params when NOT in VAE-only mode
             trainable_params.extend(list(filter(lambda p: p.requires_grad, psi_projection.parameters())))
             trainable_params_optim.extend(list(filter(lambda p: p.requires_grad, psi_projection.parameters())))
     else:
         logging.info("Add network parameters")  
         trainable_params = list(filter(lambda p: p.requires_grad, network.parameters()))
         trainable_params_optim = network.prepare_optimizer_params(args.learning_rate / 2, args.learning_rate, args.learning_rate)
-        if args.enable_psi_control:
+        if args.enable_psi_control and not args.psi_vae_only:
+            # Only add PSI projection to trainable params when NOT in VAE-only mode
             trainable_params.extend(list(filter(lambda p: p.requires_grad, psi_projection.parameters())))
             trainable_params_optim.extend(list(filter(lambda p: p.requires_grad, psi_projection.parameters())))
 
@@ -1569,7 +1586,8 @@ def main():
         else:
             # Get the most recent checkpoint
             dirs = os.listdir(args.output_dir)
-            dirs = [d for d in dirs if d.startswith("checkpoint")]
+            # Filter for checkpoint directories only (not .safetensors files)
+            dirs = [d for d in dirs if d.startswith("checkpoint") and os.path.isdir(os.path.join(args.output_dir, d))]
             dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
             path = dirs[-1] if len(dirs) > 0 else None
 
@@ -1715,7 +1733,7 @@ def main():
                         gif_name = '-'.join(text.replace('/', '').split()[:10]) if not text == '' else f'{global_step}-{idx}'
                         save_videos_grid(ref_pixel_value, f"{args.output_dir}/sanity_check/{gif_name[:10]}_ref.gif", rescale=True)
 
-            with accelerator.accumulate(*([transformer3d, psi_projection] if args.enable_psi_control else [transformer3d])):
+            with accelerator.accumulate(*([transformer3d, psi_projection] if args.enable_psi_control and not args.psi_vae_only else [transformer3d])):
                 # Convert images to latent space
                 pixel_values = batch["pixel_values"].to(weight_dtype)
                 control_pixel_values = batch["control_pixel_values"].to(weight_dtype)
@@ -1981,7 +1999,7 @@ def main():
                 if args.enable_psi_control and args.train_mode != "control_camera_ref":
                     # Unpack PSI control info
                     control_latents_base = psi_control_info['control_latents_base']  # (B, 2, C_latent, H', W')
-                    psi_semantic_features = psi_control_info['semantic_features']  # (B, 2, 8192, 32, 32)
+                    psi_semantic_features = psi_control_info['semantic_features']  # (B, 2, D, 32, 32) D=8192 or 32768
                     psi_control_meta = psi_control_info['meta']
                     
                     B, num_psi_frames, C_latent, H_latent, W_latent = control_latents_base.shape

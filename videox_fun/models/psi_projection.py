@@ -86,7 +86,10 @@ class PSIProjectionSwiGLU(nn.Module):
     """
     PSI feature projection with optional mask embedding.
     
-    Projects PSI semantic features (8192 dim) to latent space (16 dim).
+    Projects PSI semantic features to latent space (16 dim).
+    - Coarse mode (use_all_tokens=False): 8192 input channels (4096 hidden + 4096 embeddings)
+    - All tokens mode (use_all_tokens=True): 32768 input channels (4 * (4096 hidden + 4096 embeddings))
+    
     Also includes a learnable mask embedding for non-PSI-controlled frames.
     Both are zero-initialized for gradual learning.
     """

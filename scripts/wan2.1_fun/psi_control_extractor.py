@@ -46,10 +46,20 @@ class PSIControlFeatureExtractor(nn.Module):
                             (VAE encode once, then repeat latent for efficiency)
         - 'semantic_features': (B, 8192, H_psi, W_psi) - raw PSI features for projection
                                H_psi, W_psi = 32, 32 (PSI patch grid)
+                               OR (B, 32768, H_psi, W_psi) when use_all_tokens=True
+    
+    When use_all_tokens=True:
+        Uses parallel_extract_features_all_tokens which extracts features for ALL 4
+        content tokens per patch (not just the coarse token). This gives 4x more
+        features per patch with better decoded frames.
+        - Output shapes: hidden_state_2d_list (1, 32, 32, 4, 4096)
+                        embeddings_2d_list (1, 32, 32, 4, 4096)
+        - Combined feature dim: 4 * (4096 + 4096) = 32768
     """
     
-    # Class constant for PSI feature dimension
-    PSI_FEATURE_DIM = 8192  # hidden_states (4096) + embeddings (4096)
+    # Class constants for PSI feature dimensions
+    PSI_FEATURE_DIM = 8192  # hidden_states (4096) + embeddings (4096) - coarse only
+    PSI_FEATURE_DIM_ALL_TOKENS = 32768  # 4 * (4096 + 4096) - all 4 content tokens
     
     def __init__(
         self,
@@ -65,6 +75,7 @@ class PSIControlFeatureExtractor(nn.Module):
         temperature: float = 1.0,
         top_p: float = 0.9,
         top_k: int = 1000,
+        use_all_tokens: bool = False,  # Use all 4 content tokens per patch (4x more features)
         **kwargs
     ):
         super().__init__()
@@ -83,6 +94,10 @@ class PSIControlFeatureExtractor(nn.Module):
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k
+        self.use_all_tokens = use_all_tokens
+        
+        # Set the feature dimension based on extraction mode
+        self.feature_dim = self.PSI_FEATURE_DIM_ALL_TOKENS if use_all_tokens else self.PSI_FEATURE_DIM
         
         # Initialize PSIPredictor
         print(f"Initializing PSIPredictor...")
@@ -91,6 +106,7 @@ class PSIControlFeatureExtractor(nn.Module):
         print(f"  Flow quantizer: {flow_quantizer_name}")
         print(f"  Depth quantizer: {depth_quantizer_name}")
         print(f"  Device: {device}")
+        print(f"  Use all tokens: {use_all_tokens} (feature_dim={self.feature_dim})")
         
         self.predictor = PSIPredictor(
             model_name=model_name,
@@ -105,7 +121,8 @@ class PSIControlFeatureExtractor(nn.Module):
         for param in self.predictor.model.parameters():
             param.requires_grad = False
         
-        print("✓ PSIPredictor loaded successfully (frozen, no learnable params)")
+        extraction_mode = "ALL 4 tokens per patch" if use_all_tokens else "coarse token only"
+        print(f"✓ PSIPredictor loaded successfully (frozen, no learnable params, {extraction_mode})")
         
         # Register a dummy parameter for diffusers pipeline compatibility
         # This is needed because accelerate hooks require at least one parameter to determine device
@@ -182,8 +199,9 @@ class PSIControlFeatureExtractor(nn.Module):
             dict with:
                 'decoded_frames': (B, 2, C, H, W) - PSI decoded RGB frames in [-1, 1]
                                   One for each input frame (both frames decoded)
-                'semantic_features': (B, 2, 8192, H_psi, W_psi) - raw PSI features per frame
+                'semantic_features': (B, 2, D, H_psi, W_psi) - raw PSI features per frame
                                      H_psi, W_psi = 32, 32 (PSI patch grid)
+                                     D = 8192 (coarse only) or 32768 (all tokens)
         """
         # Backward compatibility: if seed is provided but not masking_seed/order_seed, use seed for both
         if seed is not None:
@@ -268,34 +286,59 @@ class PSIControlFeatureExtractor(nn.Module):
             # Time codes: 0ms and time_gap_sec*1000 ms
             time_codes = [0, int(time_gap_sec * 1000)]
             
-            # Call parallel_extract_features (no gradients needed)
+            # Call parallel_extract_features or parallel_extract_features_all_tokens (no gradients needed)
             # For PSI predictor seed (order): use provided order_seed if available, otherwise None for training diversity
             # When order_seed is fixed, ALL samples across ALL GPUs use the EXACT same token order
             # When order_seed=None, PSI predictor uses different random order each time (good for training)
             psi_predictor_seed = current_order_seed if current_order_seed is not None else None
             
             with torch.no_grad():
-                outputs = self.predictor.parallel_extract_features(
-                    prompt=prompt,
-                    rgb_frames=rgb_frames,
-                    flow_frames=None,
-                    depth_frames=None,
-                    unmask_indices_rgb=unmask_indices_rgb,
-                    unmask_indices_flow=None,
-                    unmask_indices_depth=None,
-                    camposes=None,
-                    use_campose_scale=True,
-                    time_codes=time_codes,
-                    index_order=None,
-                    conditioning_order=None,
-                    poke_vectors=None,
-                    seed=psi_predictor_seed,
-                    num_seq_patches=32,
-                    temp=self.temperature,
-                    top_p=self.top_p,
-                    top_k=self.top_k,
-                    out_dir=None,
-                )
+                if self.use_all_tokens:
+                    # Use all 4 content tokens per patch (4x more features, better decoded frames)
+                    outputs = self.predictor.parallel_extract_features_all_tokens(
+                        prompt=prompt,
+                        rgb_frames=rgb_frames,
+                        flow_frames=None,
+                        depth_frames=None,
+                        unmask_indices_rgb=unmask_indices_rgb,
+                        unmask_indices_flow=None,
+                        unmask_indices_depth=None,
+                        camposes=None,
+                        use_campose_scale=True,
+                        time_codes=time_codes,
+                        index_order=None,
+                        conditioning_order=None,
+                        poke_vectors=None,
+                        seed=psi_predictor_seed,
+                        num_seq_patches=0,  # All parallel for all_tokens mode
+                        temp=self.temperature,
+                        top_p=self.top_p,
+                        top_k=self.top_k,
+                        out_dir=None,
+                    )
+                else:
+                    # Use coarse token only (original behavior)
+                    outputs = self.predictor.parallel_extract_features(
+                        prompt=prompt,
+                        rgb_frames=rgb_frames,
+                        flow_frames=None,
+                        depth_frames=None,
+                        unmask_indices_rgb=unmask_indices_rgb,
+                        unmask_indices_flow=None,
+                        unmask_indices_depth=None,
+                        camposes=None,
+                        use_campose_scale=True,
+                        time_codes=time_codes,
+                        index_order=None,
+                        conditioning_order=None,
+                        poke_vectors=None,
+                        seed=psi_predictor_seed,
+                        num_seq_patches=32,
+                        temp=self.temperature,
+                        top_p=self.top_p,
+                        top_k=self.top_k,
+                        out_dir=None,
+                    )
             
             psi_elapsed = time.time() - psi_start_time
             print(f"[PSI GPU={self.device}] Feature extraction took {psi_elapsed:.2f}s")
@@ -304,9 +347,17 @@ class PSIControlFeatureExtractor(nn.Module):
                 raise ValueError(f"Expected dict output from PSI, got {type(outputs)}")
             
             # Extract decoded frames and semantic features from PSI output
+            # Keys differ based on extraction mode:
+            # - parallel_extract_features: hidden_state_coarse_2d_list, embeddings_coarse_2d_list (shape: 1, 32, 32, 1, 4096)
+            # - parallel_extract_features_all_tokens: hidden_state_2d_list, embeddings_2d_list (shape: 1, 32, 32, 4, 4096)
             decoded_frames_list = outputs.get('decoded_frames_list', None)
-            hidden_states_list = outputs.get('hidden_state_coarse_2d_list', None)
-            embeddings_list = outputs.get('embeddings_coarse_2d_list', None)
+            
+            if self.use_all_tokens:
+                hidden_states_list = outputs.get('hidden_state_2d_list', None)
+                embeddings_list = outputs.get('embeddings_2d_list', None)
+            else:
+                hidden_states_list = outputs.get('hidden_state_coarse_2d_list', None)
+                embeddings_list = outputs.get('embeddings_coarse_2d_list', None)
             
             if decoded_frames_list is None:
                 raise ValueError(
@@ -376,14 +427,26 @@ class PSIControlFeatureExtractor(nn.Module):
                     hidden_state = hidden_states_list[frame_idx]
                     embeddings = embeddings_list[frame_idx]
                     
-                    # Remove extra dimensions: (1, 32, 32, 1, 4096) -> (32, 32, 4096)
-                    hidden_state = hidden_state.squeeze(0).squeeze(-2)
-                    embeddings = embeddings.squeeze(0).squeeze(-2)
+                    if self.use_all_tokens:
+                        # All tokens mode: (1, 32, 32, 4, 4096) -> (32, 32, 4, 4096)
+                        hidden_state = hidden_state.squeeze(0)  # (32, 32, 4, 4096)
+                        embeddings = embeddings.squeeze(0)  # (32, 32, 4, 4096)
+                        
+                        # Flatten the 4 tokens: (32, 32, 4, 4096) -> (32, 32, 16384)
+                        hidden_state = hidden_state.reshape(32, 32, -1)  # (32, 32, 16384)
+                        embeddings = embeddings.reshape(32, 32, -1)  # (32, 32, 16384)
+                        
+                        # Combine hidden states and embeddings: (32, 32, 32768)
+                        combined = torch.cat([hidden_state, embeddings], dim=-1)
+                    else:
+                        # Coarse mode: (1, 32, 32, 1, 4096) -> (32, 32, 4096)
+                        hidden_state = hidden_state.squeeze(0).squeeze(-2)
+                        embeddings = embeddings.squeeze(0).squeeze(-2)
+                        
+                        # Combine hidden states and embeddings: (32, 32, 8192)
+                        combined = torch.cat([hidden_state, embeddings], dim=-1)
                     
-                    # Combine hidden states and embeddings: (32, 32, 8192)
-                    combined = torch.cat([hidden_state, embeddings], dim=-1)
-                    
-                    # Reshape: (32, 32, 8192) -> (8192, 32, 32)
+                    # Reshape: (32, 32, D) -> (D, 32, 32) where D = 8192 or 32768
                     semantic_features = combined.permute(2, 0, 1)
                     semantic_features = semantic_features.to(control_pixel_values.device, control_pixel_values.dtype)
                     sample_semantic_features.append(semantic_features)
@@ -391,28 +454,29 @@ class PSIControlFeatureExtractor(nn.Module):
                 # No semantic features available, create zeros for both frames
                 for _ in range(2):
                     semantic_features = torch.zeros(
-                        self.PSI_FEATURE_DIM, 32, 32,
+                        self.feature_dim, 32, 32,  # Use instance feature_dim instead of class constant
                         device=control_pixel_values.device,
                         dtype=control_pixel_values.dtype
                     )
                     sample_semantic_features.append(semantic_features)
             
-            # Stack: (2, 8192, 32, 32)
+            # Stack: (2, D, 32, 32) where D = 8192 (coarse) or 32768 (all_tokens)
             sample_semantic_features = torch.stack(sample_semantic_features, dim=0)
             batch_semantic_features.append(sample_semantic_features)
         
         # Stack batch
         # decoded_frames: (B, 2, C, H, W) - both frames per sample
         decoded_frames = torch.stack(batch_decoded_frames, dim=0)
-        # semantic_features: (B, 2, 8192, 32, 32) - features for both frames
+        # semantic_features: (B, 2, D, 32, 32) where D = 8192 (coarse) or 32768 (all_tokens)
         semantic_features = torch.stack(batch_semantic_features, dim=0)
         
-        print(f"[PSI] Output decoded_frames: {decoded_frames.shape} (2 frames)")
-        print(f"[PSI] Output semantic_features: {semantic_features.shape} (2 frames)")
+        mode_str = "all_tokens" if self.use_all_tokens else "coarse"
+        print(f"[PSI] Output decoded_frames: {decoded_frames.shape} (2 frames, mode={mode_str})")
+        print(f"[PSI] Output semantic_features: {semantic_features.shape} (2 frames, feature_dim={self.feature_dim})")
         
         return {
             'decoded_frames': decoded_frames,  # (B, 2, C, H, W) - both frames
-            'semantic_features': semantic_features,  # (B, 2, 8192, 32, 32) - features for both frames
+            'semantic_features': semantic_features,  # (B, 2, D, 32, 32) - D=8192 or 32768
         }
     
     @classmethod
@@ -440,8 +504,16 @@ class PSIControlFeatureExtractor(nn.Module):
 
 if __name__ == "__main__":
     """Test the PSI control feature extractor"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Test PSI Control Feature Extractor")
+    parser.add_argument("--use_all_tokens", action="store_true", 
+                        help="Use all 4 content tokens per patch (4x more features)")
+    args = parser.parse_args()
+    
     print("=" * 80)
     print("Testing PSI Control Feature Extractor")
+    print(f"Mode: {'all_tokens (4x features)' if args.use_all_tokens else 'coarse (1x features)'}")
     print("=" * 80)
     
     # Test configuration
@@ -451,8 +523,13 @@ if __name__ == "__main__":
         'flow_quantizer_name': "HLQ-flow-nq2-gen2_0-wavelet-small-bs512-lr1e-4-l2-coarsel21e-2-fg_v1_5/model_best.pt",
         'depth_quantizer_name': "HLQ-depth-nq2-gen2_0-wavelet-small-bs512-lr1e-4-l1-dinov21e0224-coarsel11e-2-200k_ft500k_3/model_best.pt",
         'spatial_compression': 8,
-        'device': 'cuda' if torch.cuda.is_available() else 'cpu'
+        'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+        'use_all_tokens': args.use_all_tokens,
     }
+    
+    # Expected feature dimension based on mode
+    expected_feature_dim = (PSIControlFeatureExtractor.PSI_FEATURE_DIM_ALL_TOKENS 
+                           if args.use_all_tokens else PSIControlFeatureExtractor.PSI_FEATURE_DIM)
     
     try:
         # Create extractor
@@ -487,13 +564,21 @@ if __name__ == "__main__":
         print(f"  Expected:              ({batch_size}, 2, 3, {height}, {width})")
         print(f"  decoded_frames range:  [{decoded_frames.min().item():.4f}, {decoded_frames.max().item():.4f}]")
         print(f"  semantic_features shape: {semantic_features.shape}")
-        print(f"  Expected:                ({batch_size}, 2, {PSIControlFeatureExtractor.PSI_FEATURE_DIM}, 32, 32)")
+        print(f"  Expected:                ({batch_size}, 2, {expected_feature_dim}, 32, 32)")
+        print(f"  Feature dimension:       {extractor.feature_dim}")
+        
+        # Verify dimensions
+        assert semantic_features.shape == (batch_size, 2, expected_feature_dim, 32, 32), \
+            f"Unexpected semantic_features shape: {semantic_features.shape}"
         
         print("\n" + "=" * 80)
         print("✓ Test completed successfully!")
         print("=" * 80)
         print("\nNote: decoded_frames should be VAE-encoded and semantic_features should be")
         print("projected in WanTransformer3DModel to create the final control signal.")
+        print(f"\nFor training with use_all_tokens={args.use_all_tokens}:")
+        print(f"  - PSI feature dimension: {expected_feature_dim}")
+        print(f"  - Projection layer input: {expected_feature_dim} -> model hidden dim")
         
     except Exception as e:
         print(f"\n✗ Test failed with error: {e}")

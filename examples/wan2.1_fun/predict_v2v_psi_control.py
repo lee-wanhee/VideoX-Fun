@@ -58,7 +58,8 @@ default_psi_projection_path = None  # Path to trained PSI projection
 default_checkpoint_name = "none"  # Name for output folder (e.g., "output_psi_control_test-5000")
 
 # PSI Control Extractor config (same as training)
-psi_control_extractor_config = {
+# Note: use_all_tokens is set dynamically from command line args
+psi_control_extractor_config_base = {
     'model_name': "PSI_7B_RGBCDF_bvd_4frame_Unified_Vocab_Balanced_Task_V2_continue_ctx_8192/model_01400000.pt",
     'quantizer_name': "PLPQ-ImageNetOpenImages-wavelet-small-bs512-lr1e-4-l1-dinov21e0224-coarsel11e-2/model_best.pt",
     'flow_quantizer_name': "HLQ-flow-nq2-gen2_0-wavelet-small-bs512-lr1e-4-l2-coarsel21e-2-fg_v1_5/model_best.pt",
@@ -448,6 +449,12 @@ def parse_args():
         default=default_save_path,
         help=f"Base path for saving outputs (default: {default_save_path})"
     )
+    parser.add_argument(
+        "--psi_use_all_tokens",
+        action="store_true",
+        help="Use all 4 content tokens per patch for PSI feature extraction (4x more features). "
+             "Must match the setting used during training."
+    )
     return parser.parse_args()
 
 
@@ -520,14 +527,20 @@ def main():
 
     # Load PSI Control Extractor (frozen)
     print("Loading PSI Control Extractor...")
+    psi_control_extractor_config = {
+        **psi_control_extractor_config_base,
+        'use_all_tokens': args.psi_use_all_tokens,
+    }
     psi_control_extractor = PSIControlFeatureExtractor.from_pretrained(psi_control_extractor_config)
     psi_control_extractor = psi_control_extractor.eval()
     psi_control_extractor.requires_grad_(False)
 
-    # Load PSI Projection
+    # Load PSI Projection (use dynamic feature dimension based on extraction mode)
     print("Loading PSI Projection...")
+    psi_feature_dim = psi_control_extractor.feature_dim
+    print(f"  PSI feature dimension: {psi_feature_dim} (use_all_tokens={args.psi_use_all_tokens})")
     psi_projection = PSIProjectionSwiGLU(
-        n_input_channels=8192, 
+        n_input_channels=psi_feature_dim, 
         n_hidden_channels=256, 
         n_output_channels=16
     ).to(weight_dtype)
