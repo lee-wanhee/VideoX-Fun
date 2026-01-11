@@ -659,6 +659,18 @@ def parse_args():
     parser.add_argument(
         "--enable_psi_control", action="store_true", help="Whether enable psi control."
     )
+    parser.add_argument(
+        "--psi_fix_masking_seed", type=int, default=None,
+        help="If set, use this fixed seed for PSI masking indices. If None, random masking each batch."
+    )
+    parser.add_argument(
+        "--psi_fix_order_seed", type=int, default=None,
+        help="If set, use this fixed seed for PSI token order in parallel_extract_features. If None, random order each batch."
+    )
+    parser.add_argument(
+        "--psi_vae_only", action="store_true",
+        help="If set, only use VAE-encoded PSI decoded frames without PSI semantic projection."
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -1842,7 +1854,12 @@ def main():
                                 time_gap_sec = psi_control_meta[0].get('time_gap_sec', None)
                             
                             # 1. Get PSI features and decoded frames (no grad - extractor is frozen)
-                            psi_outputs = psi_control_extractor(control_pixel_values, time_gap_sec=time_gap_sec)
+                            psi_outputs = psi_control_extractor(
+                                control_pixel_values, 
+                                time_gap_sec=time_gap_sec,
+                                masking_seed=args.psi_fix_masking_seed,
+                                order_seed=args.psi_fix_order_seed
+                            )
                             
                             # Handle PSI extraction failure - must NOT skip to avoid distributed deadlock
                             # All ranks must participate in gradient sync, so we use zeros instead
@@ -1970,26 +1987,33 @@ def main():
                     B, num_psi_frames, C_latent, H_latent, W_latent = control_latents_base.shape
                     num_latent_frames = latents.shape[2]  # Total latent frames in video
                     
-                    # 3. Project PSI semantic features for BOTH frames (trainable)
-                    # Reshape: (B, 2, 8192, 32, 32) -> (B*2, 8192, 32, 32)
-                    psi_semantic_flat = psi_semantic_features.view(B * num_psi_frames, -1, 32, 32)
-                    # Also get mask embedding at target spatial size
-                    psi_projected_flat, mask_embedding = psi_projection(
-                        psi_semantic_flat, 
-                        return_mask_embedding=True,
-                        mask_spatial_size=(H_latent, W_latent)
-                    )  # (B*2, 16, 32, 32), (1, 16, H', W')
-                    
-                    # 4. Upsample PSI features to match VAE latent spatial size
-                    psi_projected_flat = F.interpolate(
-                        psi_projected_flat, 
-                        size=(H_latent, W_latent), 
-                        mode='bilinear', 
-                        align_corners=False
-                    )  # (B*2, 16, H', W')
-                    
-                    # Reshape back: (B*2, 16, H', W') -> (B, 2, 16, H', W')
-                    psi_projected = psi_projected_flat.view(B, num_psi_frames, C_latent, H_latent, W_latent)
+                    if args.psi_vae_only:
+                        # VAE-only mode: skip PSI projection, only use VAE-encoded decoded frames
+                        # Use zeros for mask embedding (non-controlled frames)
+                        psi_projected = torch.zeros_like(control_latents_base)
+                        mask_embedding = torch.zeros(1, C_latent, H_latent, W_latent, 
+                                                    device=latents.device, dtype=latents.dtype)
+                    else:
+                        # 3. Project PSI semantic features for BOTH frames (trainable)
+                        # Reshape: (B, 2, 8192, 32, 32) -> (B*2, 8192, 32, 32)
+                        psi_semantic_flat = psi_semantic_features.view(B * num_psi_frames, -1, 32, 32)
+                        # Also get mask embedding at target spatial size
+                        psi_projected_flat, mask_embedding = psi_projection(
+                            psi_semantic_flat, 
+                            return_mask_embedding=True,
+                            mask_spatial_size=(H_latent, W_latent)
+                        )  # (B*2, 16, 32, 32), (1, 16, H', W')
+                        
+                        # 4. Upsample PSI features to match VAE latent spatial size
+                        psi_projected_flat = F.interpolate(
+                            psi_projected_flat, 
+                            size=(H_latent, W_latent), 
+                            mode='bilinear', 
+                            align_corners=False
+                        )  # (B*2, 16, H', W')
+                        
+                        # Reshape back: (B*2, 16, H', W') -> (B, 2, 16, H', W')
+                        psi_projected = psi_projected_flat.view(B, num_psi_frames, C_latent, H_latent, W_latent)
                     
                     # 5. Build control latents with proper masking
                     # For PSI-controlled frames (0 and second_frame_latent_idx): VAE + psi_projected

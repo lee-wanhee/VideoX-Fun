@@ -155,7 +155,7 @@ class PSIControlFeatureExtractor(nn.Module):
         
         return unmask_indices_list
     
-    def forward(self, control_pixel_values, fps=30.0, time_gap_sec=0.5, seed=None):
+    def forward(self, control_pixel_values, fps=30.0, time_gap_sec=0.5, seed=None, masking_seed=None, order_seed=None):
         """
         Extract raw features from input video frames using PSIPredictor.
         
@@ -173,8 +173,10 @@ class PSIControlFeatureExtractor(nn.Module):
             fps: Frames per second of the video (default: 30.0, for logging)
             time_gap_sec: Actual time gap between the two frames in seconds (default: 0.5s).
                          This is used for PSI's inter-frame feature extraction.
-            seed: Random seed for reproducible masks (inference). If None, uses current
-                  random state for diverse masks (training).
+            seed: Random seed for reproducible masks AND order (inference). If None, uses current
+                  random state for diverse masks (training). DEPRECATED: use masking_seed and order_seed.
+            masking_seed: Fixed seed for PSI masking indices. If None, random masking each batch.
+            order_seed: Fixed seed for PSI token order in parallel_extract_features. If None, random order.
         
         Returns:
             dict with:
@@ -183,10 +185,17 @@ class PSIControlFeatureExtractor(nn.Module):
                 'semantic_features': (B, 2, 8192, H_psi, W_psi) - raw PSI features per frame
                                      H_psi, W_psi = 32, 32 (PSI patch grid)
         """
-        # Use provided seed for reproducible inference, or None for training diversity
-        # When seed=None, masks will vary each forward pass (good for training)
-        # When seed is provided, masks are reproducible (good for inference)
-        current_seed = seed  # Keep as None if not provided
+        # Backward compatibility: if seed is provided but not masking_seed/order_seed, use seed for both
+        if seed is not None:
+            if masking_seed is None:
+                masking_seed = seed
+            if order_seed is None:
+                order_seed = seed
+        
+        # Use provided masking_seed for reproducible masking, or None for training diversity
+        current_masking_seed = masking_seed  # Keep as None if not provided
+        # Use provided order_seed for reproducible order, or None for training diversity
+        current_order_seed = order_seed  # Keep as None if not provided
         batch_size, num_frames, channels, height, width = control_pixel_values.shape
         
         # Expect exactly 2 frames from dataloader
@@ -235,10 +244,11 @@ class PSIControlFeatureExtractor(nn.Module):
                 rgb_frames.append(frame_np)
             
             # Create masks for the 2 frames
-            # If seed is provided (inference), use it for reproducible masks
-            # If seed is None (training), use current random state for diverse masks
-            frame0_seed = (current_seed + b) if current_seed is not None else None
-            frame1_seed = (current_seed + b + 1) if current_seed is not None else None
+            # If masking_seed is provided, use SAME mask for ALL samples (same seed, no batch offset)
+            # If masking_seed is None (training), use current random state for diverse masks
+            # Note: When fixed seed is set, ALL samples across ALL GPUs get the EXACT same mask pattern
+            frame0_seed = current_masking_seed if current_masking_seed is not None else None
+            frame1_seed = (current_masking_seed + 1) if current_masking_seed is not None else None
             
             unmask_indices_frame0 = self.create_mask_indices(
                 mask_ratio=self.mask_ratio_cond,
@@ -259,9 +269,10 @@ class PSIControlFeatureExtractor(nn.Module):
             time_codes = [0, int(time_gap_sec * 1000)]
             
             # Call parallel_extract_features (no gradients needed)
-            # For PSI predictor seed: use provided seed if available, otherwise None for training diversity
-            # When seed=None, PSI predictor uses different random outputs each time (good for training)
-            psi_predictor_seed = (current_seed + b) if current_seed is not None else None
+            # For PSI predictor seed (order): use provided order_seed if available, otherwise None for training diversity
+            # When order_seed is fixed, ALL samples across ALL GPUs use the EXACT same token order
+            # When order_seed=None, PSI predictor uses different random order each time (good for training)
+            psi_predictor_seed = current_order_seed if current_order_seed is not None else None
             
             with torch.no_grad():
                 outputs = self.predictor.parallel_extract_features(
