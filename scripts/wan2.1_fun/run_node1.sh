@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # Multi-Node Training - Node 1 (Worker)
-# Run this on n24
+# Run this on n05
 # ==============================================================================
 
 # Load required modules
@@ -36,26 +36,9 @@ export MODEL_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/models/Wan2.1-Fun-1.
 export DATASET_NAME="/scratch/m000063/data/bvd2/kinetics700"
 export DATASET_META_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/kinetics700_49f.csv"
 
-# Output directory with timestamp (similar to SLURM job behavior)
-# Node 1 reads the timestamp from shared file written by Node 0
-# Wait for Node 0 to write the timestamp (up to 60 seconds)
-SYNC_FILE="/scratch/m000063/users/wanhee/VideoX-Fun/.run_sync/current_timestamp"
-echo "Waiting for Node 0 to write timestamp..."
-for i in {1..60}; do
-    if [ -f "$SYNC_FILE" ]; then
-        TIMESTAMP=$(cat "$SYNC_FILE")
-        echo "Read timestamp from sync file: $TIMESTAMP"
-        break
-    fi
-    sleep 1
-done
-
-if [ -z "$TIMESTAMP" ]; then
-    echo "ERROR: Could not read timestamp from Node 0. Make sure Node 0 is started first!"
-    exit 1
-fi
-
-export OUTPUT_DIR="/scratch/m000063/users/wanhee/VideoX-Fun/output_psi_control_${TIMESTAMP}"
+# Output directory - use existing checkpoint directory to resume training
+export OUTPUT_DIR="/scratch/m000063/users/wanhee/VideoX-Fun/output_psi_control_20260109_120659"
+echo "Using existing output dir: $OUTPUT_DIR"
 
 # NCCL settings for multi-node
 export NCCL_DEBUG=INFO
@@ -63,11 +46,11 @@ export NCCL_IB_DISABLE=0
 export NCCL_NET_GDR_LEVEL=2
 
 # Multi-node configuration
-export MASTER_ADDR=n22
+export MASTER_ADDR=n04
 export MASTER_PORT=45678
 export NODE_RANK=1
 
-NNODES=2
+NNODES=4
 GPUS_PER_NODE=8
 WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 
@@ -76,12 +59,12 @@ echo "Training Configuration:"
 echo "=============================================="
 echo "MASTER_ADDR: $MASTER_ADDR"
 echo "MASTER_PORT: $MASTER_PORT"
-echo "WORLD_SIZE: $WORLD_SIZE (2 nodes × 8 GPUs)"
+echo "WORLD_SIZE: $WORLD_SIZE (4 nodes × 8 GPUs)"
 echo "NNODES: $NNODES"
 echo "NODE_RANK: $NODE_RANK"
-echo "Effective batch size: 128 (1 × 8 grad_accum × 16 GPUs)"
+echo "Effective batch size: 256 (1 × 8 grad_accum × 32 GPUs)"
 echo "Learning rate: 1e-5 (Stage 1)"
-echo "Max steps: 5000"
+echo "Max steps: 20000"
 echo "Checkpointing: every 1000 steps"
 echo "Logging: WandB (long-range-prediction/wan-psi-control)"
 echo "Output dir: $OUTPUT_DIR"
@@ -113,7 +96,7 @@ accelerate launch \
     --max_train_steps=20000 \
     --checkpointing_steps=1000 \
     --learning_rate=1e-05 \
-    --seed=42 \
+    --seed=123 \
     --output_dir=$OUTPUT_DIR \
     --gradient_checkpointing \
     --mixed_precision="bf16" \

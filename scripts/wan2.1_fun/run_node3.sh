@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
-# Multi-Node Training - Node 0 (Master)
-# Run this on n04
+# Multi-Node Training - Node 3 (Worker)
+# Run this on n30
 # ==============================================================================
 
 # Load required modules
@@ -38,10 +38,6 @@ export DATASET_META_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/kine
 
 # Output directory - use existing checkpoint directory to resume training
 export OUTPUT_DIR="/scratch/m000063/users/wanhee/VideoX-Fun/output_psi_control_20260109_120659"
-
-# Write to shared file for other nodes
-mkdir -p /scratch/m000063/users/wanhee/VideoX-Fun/.run_sync
-echo "20260109_120659" > /scratch/m000063/users/wanhee/VideoX-Fun/.run_sync/current_timestamp
 echo "Using existing output dir: $OUTPUT_DIR"
 
 # NCCL settings for multi-node
@@ -52,7 +48,7 @@ export NCCL_NET_GDR_LEVEL=2
 # Multi-node configuration
 export MASTER_ADDR=n04
 export MASTER_PORT=45678
-export NODE_RANK=0
+export NODE_RANK=3
 
 NNODES=4
 GPUS_PER_NODE=8
@@ -122,4 +118,5 @@ accelerate launch \
     --report_to="wandb" \
     --tracker_project_name="wan-psi-control" \
     --resume_from_checkpoint="latest"
+
 
