@@ -49,25 +49,9 @@ export MODEL_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/models/Wan2.1-Fun-1.
 export DATASET_NAME="/scratch/m000063/data/bvd2/kinetics700"
 export DATASET_META_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/kinetics700_49f.csv"
 
-# Output directory with experiment name
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-export OUTPUT_DIR="/scratch/m000063/users/wanhee/VideoX-Fun/output_exp3_diff_mask_diff_order_vae_only_${TIMESTAMP}"
-
-# Create output directory only on master node
-if [ "$NODE_RANK" -eq 0 ]; then
-    mkdir -p $OUTPUT_DIR
-    mkdir -p /scratch/m000063/users/wanhee/VideoX-Fun/.run_sync
-    echo "${TIMESTAMP}" > /scratch/m000063/users/wanhee/VideoX-Fun/.run_sync/exp3_timestamp
-    echo "Created output dir: $OUTPUT_DIR"
-else
-    # Worker nodes: wait for master to create timestamp file, then read it
-    sleep 5
-    if [ -f /scratch/m000063/users/wanhee/VideoX-Fun/.run_sync/exp3_timestamp ]; then
-        TIMESTAMP=$(cat /scratch/m000063/users/wanhee/VideoX-Fun/.run_sync/exp3_timestamp)
-        export OUTPUT_DIR="/scratch/m000063/users/wanhee/VideoX-Fun/output_exp3_diff_mask_diff_order_vae_only_${TIMESTAMP}"
-    fi
-    echo "Using output dir: $OUTPUT_DIR"
-fi
+# Output directory - use existing checkpoint directory to resume training
+export OUTPUT_DIR="/scratch/m000063/users/wanhee/VideoX-Fun/output_exp3_diff_mask_diff_order_vae_only_20260110_170958"
+echo "Using existing output dir: $OUTPUT_DIR (resuming from checkpoint)"
 
 # NCCL settings for multi-node
 export NCCL_DEBUG=INFO
@@ -146,5 +130,6 @@ accelerate launch \
     --enable_psi_control \
     --psi_vae_only \
     --report_to="wandb" \
-    --tracker_project_name="wan-psi-control"
+    --tracker_project_name="wan-psi-control" \
+    --resume_from_checkpoint="latest"
 
