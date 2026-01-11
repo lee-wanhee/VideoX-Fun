@@ -333,7 +333,7 @@ class PSIControlFeatureExtractor(nn.Module):
                         conditioning_order=None,
                         poke_vectors=None,
                         seed=psi_predictor_seed,
-                        num_seq_patches=32,
+                        num_seq_patches=0,  # All parallel for faster extraction
                         temp=self.temperature,
                         top_p=self.top_p,
                         top_k=self.top_k,
