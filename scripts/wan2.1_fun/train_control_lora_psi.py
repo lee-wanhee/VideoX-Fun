@@ -1915,11 +1915,13 @@ def main():
                                 device = control_pixel_values.device
                                 dtype = control_pixel_values.dtype
                                 # Create dummy tensors with expected shapes
+                                # Feature dim is 8192 for coarse mode, 32768 for all_tokens mode
+                                psi_feature_dim = psi_control_extractor.feature_dim
                                 decoded_frames = torch.zeros(B, 2, 3, 512, 512, device=device, dtype=dtype)
-                                psi_semantic_features = torch.zeros(B, 2, 8192, 32, 32, device=device, dtype=dtype)
+                                psi_semantic_features = torch.zeros(B, 2, psi_feature_dim, 32, 32, device=device, dtype=dtype)
                             else:
                                 decoded_frames = psi_outputs['decoded_frames']  # (B, 2, C, H, W) - both frames
-                                psi_semantic_features = psi_outputs['semantic_features']  # (B, 2, 8192, 32, 32)
+                                psi_semantic_features = psi_outputs['semantic_features']  # (B, 2, D, 32, 32) where D=8192 or 32768
                             
                             # 2. VAE encode BOTH decoded frames
                             # Shape: (B, 2, C, H, W) -> encode each frame separately
@@ -1935,7 +1937,7 @@ def main():
                             # Store for later use in PSI projection step
                             psi_control_info = {
                                 'control_latents_base': control_latents_base,  # (B, 2, C_latent, H', W')
-                                'semantic_features': psi_semantic_features,  # (B, 2, 8192, 32, 32)
+                                'semantic_features': psi_semantic_features,  # (B, 2, D, 32, 32) where D=8192 or 32768
                                 'meta': psi_control_meta,
                             }
                             # control_latents will be created after PSI projection (outside no_grad)
@@ -2041,7 +2043,7 @@ def main():
                                                     device=latents.device, dtype=latents.dtype)
                     else:
                         # 3. Project PSI semantic features for BOTH frames (trainable)
-                        # Reshape: (B, 2, 8192, 32, 32) -> (B*2, 8192, 32, 32)
+                        # Reshape: (B, 2, D, 32, 32) -> (B*2, D, 32, 32) where D=8192 or 32768
                         psi_semantic_flat = psi_semantic_features.view(B * num_psi_frames, -1, 32, 32)
                         # Also get mask embedding at target spatial size
                         psi_projected_flat, mask_embedding = psi_projection(
