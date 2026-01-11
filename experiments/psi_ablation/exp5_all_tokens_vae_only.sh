@@ -138,7 +138,10 @@ accelerate launch \
     --enable_psi_control \
     --psi_use_all_tokens \
     --psi_vae_only \
+    --save_state \
     --report_to="wandb" \
     --tracker_project_name="wan-psi-control"
+    # To resume training, uncomment the line below and set OUTPUT_DIR to existing checkpoint dir:
+    # --resume_from_checkpoint="latest"
 
 

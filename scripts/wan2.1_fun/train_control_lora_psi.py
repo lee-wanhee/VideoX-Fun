@@ -955,8 +955,8 @@ def main():
                                 network_state_dict[key.replace("network.", "")] = accelerate_state_dict[key].to(weight_dtype)
                     save_file(network_state_dict, safetensor_save_path, metadata={"format": "pt"})
 
-                    # Save PSI projection model (only if enabled)
-                    if args.enable_psi_control:
+                    # Save PSI projection model (only if enabled and trained)
+                    if args.enable_psi_control and not args.psi_vae_only:
                         psi_projection_save_path = os.path.join(output_dir, "psi_projection.safetensors")
                         psi_projection_state_dict = {k: v.to(weight_dtype) for k, v in accelerator.unwrap_model(psi_projection).state_dict().items()}
                         save_file(psi_projection_state_dict, psi_projection_save_path, metadata={"format": "pt"})
@@ -972,6 +972,15 @@ def main():
                         loaded_number, _ = pickle.load(file)
                         batch_sampler.sampler._pos_start = max(loaded_number - args.dataloader_num_workers * accelerator.num_processes * 2, 0)
                     print(f"Load pkl from {pkl_path}. Get loaded_number = {loaded_number}.")
+                
+                # Load PSI projection model (only if enabled and not vae_only)
+                if args.enable_psi_control and not args.psi_vae_only:
+                    psi_projection_path = os.path.join(input_dir, "psi_projection.safetensors")
+                    if os.path.exists(psi_projection_path):
+                        from safetensors.torch import load_file
+                        psi_state_dict = load_file(psi_projection_path)
+                        accelerator.unwrap_model(psi_projection).load_state_dict(psi_state_dict)
+                        print(f"Loaded PSI projection from {psi_projection_path}")
 
         elif zero_stage == 3:
             # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
@@ -989,8 +998,8 @@ def main():
                         network_state_dict = accelerate_state_dict
                     save_file(network_state_dict, safetensor_save_path, metadata={"format": "pt"})
 
-                    # Save PSI projection model (only if enabled)
-                    if args.enable_psi_control:
+                    # Save PSI projection model (only if enabled and trained)
+                    if args.enable_psi_control and not args.psi_vae_only:
                         psi_projection_save_path = os.path.join(output_dir, "psi_projection.safetensors")
                         psi_projection_state_dict = {k: v.to(weight_dtype) for k, v in accelerator.unwrap_model(psi_projection).state_dict().items()}
                         save_file(psi_projection_state_dict, psi_projection_save_path, metadata={"format": "pt"})
@@ -1006,6 +1015,16 @@ def main():
                         loaded_number, _ = pickle.load(file)
                         batch_sampler.sampler._pos_start = max(loaded_number - args.dataloader_num_workers * accelerator.num_processes * 2, 0)
                     print(f"Load pkl from {pkl_path}. Get loaded_number = {loaded_number}.")
+                
+                # Load PSI projection model (only if enabled and not vae_only)
+                if args.enable_psi_control and not args.psi_vae_only:
+                    psi_projection_path = os.path.join(input_dir, "psi_projection.safetensors")
+                    if os.path.exists(psi_projection_path):
+                        from safetensors.torch import load_file
+                        psi_state_dict = load_file(psi_projection_path)
+                        accelerator.unwrap_model(psi_projection).load_state_dict(psi_state_dict)
+                        print(f"Loaded PSI projection from {psi_projection_path}")
+
         else:
             # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
             def save_model_hook(models, weights, output_dir):
@@ -1021,8 +1040,8 @@ def main():
                     else:
                         save_model(safetensor_save_path, accelerator.unwrap_model(models[-1]))
 
-                    # Save PSI projection model (only if enabled)
-                    if args.enable_psi_control:
+                    # Save PSI projection model (only if enabled and trained)
+                    if args.enable_psi_control and not args.psi_vae_only:
                         from safetensors.torch import save_file as save_safetensors
                         psi_projection_save_path = os.path.join(output_dir, "psi_projection.safetensors")
                         psi_projection_state_dict = {k: v.to(weight_dtype) for k, v in accelerator.unwrap_model(psi_projection).state_dict().items()}
@@ -1043,6 +1062,15 @@ def main():
                         loaded_number, _ = pickle.load(file)
                         batch_sampler.sampler._pos_start = max(loaded_number - args.dataloader_num_workers * accelerator.num_processes * 2, 0)
                     print(f"Load pkl from {pkl_path}. Get loaded_number = {loaded_number}.")
+                
+                # Load PSI projection model (only if enabled and not vae_only)
+                if args.enable_psi_control and not args.psi_vae_only:
+                    psi_projection_path = os.path.join(input_dir, "psi_projection.safetensors")
+                    if os.path.exists(psi_projection_path):
+                        from safetensors.torch import load_file
+                        psi_state_dict = load_file(psi_projection_path)
+                        accelerator.unwrap_model(psi_projection).load_state_dict(psi_state_dict)
+                        print(f"Loaded PSI projection from {psi_projection_path}")
 
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
@@ -2251,6 +2279,14 @@ def main():
                                 safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
                                 save_model(safetensor_save_path, accelerator.unwrap_model(network))
                                 logger.info(f"Saved safetensor to {safetensor_save_path}")
+                            
+                            # Save PSI projection model at each checkpoint (only if enabled and trained)
+                            if args.enable_psi_control and not args.psi_vae_only:
+                                from safetensors.torch import save_file as save_safetensors
+                                psi_save_path = os.path.join(args.output_dir, f"psi_projection-{global_step}.safetensors")
+                                psi_state_dict = {k: v.to(weight_dtype) for k, v in accelerator.unwrap_model(psi_projection).state_dict().items()}
+                                save_safetensors(psi_state_dict, psi_save_path, metadata={"format": "pt"})
+                                logger.info(f"Saved PSI projection to {psi_save_path}")
                         else:
                             accelerator_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                             accelerator.save_state(accelerator_save_path)
@@ -2319,8 +2355,8 @@ def main():
                 save_model(safetensor_save_path, accelerator.unwrap_model(network))
                 logger.info(f"Saved safetensor to {safetensor_save_path}")
             
-            # Save PSI projection model (only if enabled)
-            if args.enable_psi_control:
+            # Save PSI projection model (only if enabled and trained)
+            if args.enable_psi_control and not args.psi_vae_only:
                 from safetensors.torch import save_file as save_safetensors
                 psi_save_path = os.path.join(args.output_dir, f"psi_projection-{global_step}.safetensors")
                 psi_state_dict = {k: v.to(weight_dtype) for k, v in accelerator.unwrap_model(psi_projection).state_dict().items()}

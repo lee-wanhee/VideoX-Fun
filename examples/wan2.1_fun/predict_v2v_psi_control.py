@@ -545,12 +545,18 @@ def main():
         n_output_channels=16
     ).to(weight_dtype)
     
-    if run_psi_projection_path is not None and os.path.exists(run_psi_projection_path):
+    if run_psi_projection_path is not None:
+        if not os.path.exists(run_psi_projection_path):
+            raise FileNotFoundError(
+                f"PSI projection checkpoint not found: {run_psi_projection_path}\n"
+                f"Please check the path or remove --psi_projection_path to use random initialization."
+            )
         print(f"Loading trained PSI projection from: {run_psi_projection_path}")
         psi_state_dict = load_file(run_psi_projection_path)
         psi_projection.load_state_dict(psi_state_dict)
     else:
-        print("INFO: No trained PSI projection path provided. Using random initialization.")
+        print("WARNING: No PSI projection path provided. Using random initialization.")
+        print("         This is likely NOT what you want for inference!")
     psi_projection = psi_projection.eval()
 
     # Load Scheduler
@@ -579,11 +585,17 @@ def main():
         pipeline.to(device=device)
 
     # Merge LoRA if provided
-    if run_lora_path is not None and os.path.exists(run_lora_path):
+    if run_lora_path is not None:
+        if not os.path.exists(run_lora_path):
+            raise FileNotFoundError(
+                f"LoRA checkpoint not found: {run_lora_path}\n"
+                f"Please check the path or remove --lora_path to use base model weights."
+            )
         print(f"Merging LoRA from: {run_lora_path}")
         pipeline = merge_lora(pipeline, run_lora_path, lora_weight, device=device, dtype=weight_dtype)
     else:
-        print("INFO: No LoRA path provided. Using base model weights.")
+        print("WARNING: No LoRA path provided. Using base model weights.")
+        print("         This is likely NOT what you want for inference!")
 
     print("=" * 60)
     print("Loading input video...")

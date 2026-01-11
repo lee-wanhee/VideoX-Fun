@@ -49,9 +49,11 @@ export MODEL_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/models/Wan2.1-Fun-1.
 export DATASET_NAME="/scratch/m000063/data/bvd2/kinetics700"
 export DATASET_META_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/kinetics700_49f.csv"
 
-# Output directory - use existing checkpoint directory to resume training
-export OUTPUT_DIR="/scratch/m000063/users/wanhee/VideoX-Fun/output_exp3_diff_mask_diff_order_vae_only_20260110_170958"
-echo "Using existing output dir: $OUTPUT_DIR (resuming from checkpoint)"
+# Output directory with timestamp (for fresh start)
+# To resume: set OUTPUT_DIR to existing checkpoint directory and uncomment --resume_from_checkpoint
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+export OUTPUT_DIR="/scratch/m000063/users/wanhee/VideoX-Fun/output_exp3_diff_mask_diff_order_vae_only_${TIMESTAMP}"
+echo "Output directory: $OUTPUT_DIR"
 
 # NCCL settings for multi-node
 export NCCL_DEBUG=INFO
@@ -129,7 +131,9 @@ accelerate launch \
     --use_peft_lora \
     --enable_psi_control \
     --psi_vae_only \
+    --save_state \
     --report_to="wandb" \
-    --tracker_project_name="wan-psi-control" \
-    --resume_from_checkpoint="latest"
+    --tracker_project_name="wan-psi-control"
+    # To resume training, uncomment the line below and set OUTPUT_DIR to existing checkpoint dir:
+    # --resume_from_checkpoint="latest"
 
