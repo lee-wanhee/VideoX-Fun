@@ -372,6 +372,10 @@ class PSIControlFeatureExtractor(nn.Module):
                 print(f"[PSI FAIL] Expected 2 decoded frames, got {len(decoded_frames_list)}")
                 print(f"[PSI FAIL] Output keys: {list(outputs.keys())}")
                 print(f"[PSI FAIL] Input: rgb_frames={len(rgb_frames)}, time_codes={time_codes}, prompt={prompt}")
+                print(f"[PSI FAIL] use_all_tokens={self.use_all_tokens}")
+                print(f"[PSI FAIL] unmask_indices_rgb lengths: {[len(x) for x in unmask_indices_rgb]}")
+                
+                # Log decoded frames info
                 for i, frame in enumerate(decoded_frames_list):
                     frame_info = f"type={type(frame).__name__}"
                     if hasattr(frame, 'shape'):
@@ -379,6 +383,17 @@ class PSIControlFeatureExtractor(nn.Module):
                     elif hasattr(frame, 'size'):
                         frame_info += f", size={frame.size}"
                     print(f"[PSI FAIL] decoded_frames_list[{i}]: {frame_info}")
+                
+                # Log hidden states and embeddings info
+                if hidden_states_list is not None:
+                    print(f"[PSI FAIL] hidden_states_list length: {len(hidden_states_list)}")
+                else:
+                    print(f"[PSI FAIL] hidden_states_list is None")
+                if embeddings_list is not None:
+                    print(f"[PSI FAIL] embeddings_list length: {len(embeddings_list)}")
+                else:
+                    print(f"[PSI FAIL] embeddings_list is None")
+                    
                 return None
             
             # Process both frames
