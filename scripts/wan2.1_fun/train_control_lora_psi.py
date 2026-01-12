@@ -1617,6 +1617,8 @@ def main():
     first_epoch = 0
 
     # Potentially load in the weights and states from a previous save
+    accelerator.print(f"[DEBUG] resume_from_checkpoint = '{args.resume_from_checkpoint}'")
+    accelerator.print(f"[DEBUG] output_dir = '{args.output_dir}'")
     if args.resume_from_checkpoint:
         if args.resume_from_checkpoint != "latest":
             path = os.path.basename(args.resume_from_checkpoint)
@@ -1719,6 +1721,19 @@ def main():
 
     else:
         initial_global_step = 0
+
+    accelerator.print(f"[DEBUG] initial_global_step = {initial_global_step}")
+    accelerator.print(f"[DEBUG] global_step = {global_step}")
+    accelerator.print(f"[DEBUG] first_epoch = {first_epoch}")
+
+    # STRICT CHECK: If resume was requested, ensure checkpoint was actually loaded
+    if args.resume_from_checkpoint and initial_global_step == 0:
+        raise ValueError(
+            f"FATAL: --resume_from_checkpoint='{args.resume_from_checkpoint}' was specified, "
+            f"but checkpoint was NOT loaded (initial_global_step=0). "
+            f"output_dir='{args.output_dir}'. "
+            f"This should never happen - check the checkpoint loading logic above."
+        )
 
     # function for saving/removing
     def save_model(ckpt_file, unwrapped_nw):
