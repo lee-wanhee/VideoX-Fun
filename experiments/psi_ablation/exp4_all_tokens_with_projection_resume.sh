@@ -138,3 +138,4 @@ accelerate launch \
     --tracker_project_name="wan-psi-control" \
     --resume_from_checkpoint="latest"
 
+# worked on 2026-01-12
