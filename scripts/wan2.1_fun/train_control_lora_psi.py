@@ -1617,9 +1617,12 @@ def main():
     first_epoch = 0
 
     # Potentially load in the weights and states from a previous save
-    accelerator.print(f"[DEBUG] resume_from_checkpoint = '{args.resume_from_checkpoint}'")
-    accelerator.print(f"[DEBUG] output_dir = '{args.output_dir}'")
+    accelerator.print(f"[RESUME DEBUG] resume_from_checkpoint = '{args.resume_from_checkpoint}'")
+    accelerator.print(f"[RESUME DEBUG] output_dir = '{args.output_dir}'")
+    
     if args.resume_from_checkpoint:
+        accelerator.print(f"[RESUME DEBUG] Entering checkpoint loading block...")
+        
         if args.resume_from_checkpoint != "latest":
             path = os.path.basename(args.resume_from_checkpoint)
         else:
@@ -1630,49 +1633,68 @@ def main():
             dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
             path = dirs[-1] if len(dirs) > 0 else None
 
+        accelerator.print(f"[RESUME DEBUG] Resolved path = '{path}'")
+        
         # Verify the checkpoint folder exists
         checkpoint_folder_path = os.path.join(args.output_dir, path) if path else None
+        accelerator.print(f"[RESUME DEBUG] checkpoint_folder_path = '{checkpoint_folder_path}'")
+        accelerator.print(f"[RESUME DEBUG] os.path.isdir(checkpoint_folder_path) = {os.path.isdir(checkpoint_folder_path) if checkpoint_folder_path else False}")
+        
         if path is None or not os.path.isdir(checkpoint_folder_path):
             raise ValueError(
                 f"Checkpoint '{args.resume_from_checkpoint}' does not exist in '{args.output_dir}'. "
                 f"Resolved path: '{checkpoint_folder_path}'. "
                 f"Cannot resume training. Please check the output directory contains valid checkpoint folders."
             )
+        
+        accelerator.print(f"[RESUME DEBUG] Checkpoint folder verified to exist!")
+        global_step = int(path.split("-")[1])
+        accelerator.print(f"[RESUME DEBUG] global_step set to {global_step}")
+
+        initial_global_step = global_step
+        accelerator.print(f"[RESUME DEBUG] initial_global_step set to {initial_global_step}")
+
+        pkl_path = os.path.join(checkpoint_folder_path, "sampler_pos_start.pkl")
+        if os.path.exists(pkl_path):
+            with open(pkl_path, 'rb') as file:
+                _, first_epoch = pickle.load(file)
         else:
-            accelerator.print(f"Resuming from checkpoint: {checkpoint_folder_path}")
-            global_step = int(path.split("-")[1])
+            first_epoch = global_step // num_update_steps_per_epoch
+        accelerator.print(f"[RESUME DEBUG] first_epoch = {first_epoch}")
 
-            initial_global_step = global_step
-
-            pkl_path = os.path.join(checkpoint_folder_path, "sampler_pos_start.pkl")
-            if os.path.exists(pkl_path):
-                with open(pkl_path, 'rb') as file:
-                    _, first_epoch = pickle.load(file)
-            else:
-                first_epoch = global_step // num_update_steps_per_epoch
-            print(f"Load pkl from {pkl_path}. Get first_epoch = {first_epoch}.")
-
-            # Use accelerator.load_state() for ALL cases - this triggers the registered
-            # save/load hooks that properly restore LoRA weights, PSI projection, and sampler position
-            accelerator.print(f"Loading checkpoint using accelerator.load_state() from {checkpoint_folder_path}")
+        # Use accelerator.load_state() for ALL cases - this triggers the registered
+        # save/load hooks that properly restore LoRA weights, PSI projection, and sampler position
+        accelerator.print(f"[RESUME DEBUG] Calling accelerator.load_state({checkpoint_folder_path})...")
+        try:
             accelerator.load_state(checkpoint_folder_path)
-            accelerator.print(f"accelerator.load_state() completed successfully. Resumed from step {global_step}.")
+            accelerator.print(f"[RESUME DEBUG] accelerator.load_state() completed successfully!")
+        except Exception as e:
+            accelerator.print(f"[RESUME DEBUG] accelerator.load_state() FAILED with error: {e}")
+            raise
+        
+        accelerator.print(f"[RESUME DEBUG] Checkpoint loading complete. Resuming from step {global_step}.")
 
     else:
+        accelerator.print(f"[RESUME DEBUG] args.resume_from_checkpoint is FALSY, starting from scratch!")
         initial_global_step = 0
 
-    accelerator.print(f"[DEBUG] initial_global_step = {initial_global_step}")
-    accelerator.print(f"[DEBUG] global_step = {global_step}")
-    accelerator.print(f"[DEBUG] first_epoch = {first_epoch}")
+    accelerator.print(f"[RESUME DEBUG] === FINAL STATE ===")
+    accelerator.print(f"[RESUME DEBUG] initial_global_step = {initial_global_step}")
+    accelerator.print(f"[RESUME DEBUG] global_step = {global_step}")
+    accelerator.print(f"[RESUME DEBUG] first_epoch = {first_epoch}")
+    accelerator.print(f"[RESUME DEBUG] ===================")
 
     # STRICT CHECK: If resume was requested, ensure checkpoint was actually loaded
-    if args.resume_from_checkpoint and initial_global_step == 0:
-        raise ValueError(
-            f"FATAL: --resume_from_checkpoint='{args.resume_from_checkpoint}' was specified, "
-            f"but checkpoint was NOT loaded (initial_global_step=0). "
-            f"output_dir='{args.output_dir}'. "
-            f"This should never happen - check the checkpoint loading logic above."
-        )
+    if args.resume_from_checkpoint:
+        if initial_global_step == 0:
+            raise ValueError(
+                f"FATAL: --resume_from_checkpoint='{args.resume_from_checkpoint}' was specified, "
+                f"but checkpoint was NOT loaded (initial_global_step=0). "
+                f"output_dir='{args.output_dir}'. "
+                f"This should never happen - check the checkpoint loading logic above."
+            )
+        else:
+            accelerator.print(f"[RESUME DEBUG] SUCCESS! Training will resume from step {initial_global_step}")
 
     # function for saving/removing
     def save_model(ckpt_file, unwrapped_nw):
@@ -1683,6 +1705,17 @@ def main():
             save_file(unwrapped_nw, ckpt_file, metadata={"format": "pt"})
             return ckpt_file
         unwrapped_nw.save_weights(ckpt_file, weight_dtype, None)
+
+    # FINAL SAFETY CHECK: Raise error if resume was requested but we're starting from 0
+    if args.resume_from_checkpoint and initial_global_step == 0:
+        raise RuntimeError(
+            f"FATAL ERROR: About to start progress bar at step 0, but resume was requested!\n"
+            f"  --resume_from_checkpoint = '{args.resume_from_checkpoint}'\n"
+            f"  initial_global_step = {initial_global_step}\n"
+            f"  global_step = {global_step}\n"
+            f"  output_dir = '{args.output_dir}'\n"
+            f"Something went wrong with checkpoint loading. STOPPING."
+        )
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
