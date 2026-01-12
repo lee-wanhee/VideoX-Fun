@@ -690,7 +690,16 @@ def parse_args():
 
 
 def main():
+    import sys
+    print("=" * 80, flush=True)
+    print("[SCRIPT START] train_control_lora_psi.py main() called", flush=True)
+    print(f"[SCRIPT START] sys.argv = {sys.argv}", flush=True)
+    print("=" * 80, flush=True)
+    
     args = parse_args()
+    
+    print(f"[ARGS PARSED] resume_from_checkpoint = '{args.resume_from_checkpoint}'", flush=True)
+    print(f"[ARGS PARSED] output_dir = '{args.output_dir}'", flush=True)
 
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
@@ -1617,8 +1626,8 @@ def main():
     first_epoch = 0
 
     # Potentially load in the weights and states from a previous save
-    accelerator.print(f"[RESUME DEBUG] resume_from_checkpoint = '{args.resume_from_checkpoint}'")
-    accelerator.print(f"[RESUME DEBUG] output_dir = '{args.output_dir}'")
+    print(f"[RESUME DEBUG] resume_from_checkpoint = '{args.resume_from_checkpoint}'", flush=True)
+    print(f"[RESUME DEBUG] output_dir = '{args.output_dir}'", flush=True)
     
     if args.resume_from_checkpoint:
         accelerator.print(f"[RESUME DEBUG] Entering checkpoint loading block...")
@@ -1707,7 +1716,10 @@ def main():
         unwrapped_nw.save_weights(ckpt_file, weight_dtype, None)
 
     # FINAL SAFETY CHECK: Raise error if resume was requested but we're starting from 0
+    print(f"[PROGRESS BAR] About to create progress bar with initial_global_step={initial_global_step}", flush=True)
+    print(f"[PROGRESS BAR] args.resume_from_checkpoint = '{args.resume_from_checkpoint}'", flush=True)
     if args.resume_from_checkpoint and initial_global_step == 0:
+        print("FATAL ERROR DETECTED! Raising RuntimeError...", flush=True)
         raise RuntimeError(
             f"FATAL ERROR: About to start progress bar at step 0, but resume was requested!\n"
             f"  --resume_from_checkpoint = '{args.resume_from_checkpoint}'\n"

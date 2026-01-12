@@ -55,8 +55,7 @@ export DATASET_META_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/kine
 export OUTPUT_DIR="/scratch/m000063/users/wanhee/VideoX-Fun/output_exp4_all_tokens_with_projection_20260111_202638"
 echo "Resuming from output directory: $OUTPUT_DIR"
 
-# NCCL settings for multi-node
-export NCCL_DEBUG=WARN
+# NCCL settings for multi-node (NCCL_DEBUG unset to suppress all NCCL output)
 export NCCL_IB_DISABLE=0
 export NCCL_NET_GDR_LEVEL=2
 
