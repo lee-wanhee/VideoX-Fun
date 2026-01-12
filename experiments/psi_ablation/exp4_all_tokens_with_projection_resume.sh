@@ -55,7 +55,8 @@ export DATASET_META_NAME="/scratch/m000063/users/wanhee/VideoX-Fun/datasets/kine
 export OUTPUT_DIR="/scratch/m000063/users/wanhee/VideoX-Fun/output_exp4_all_tokens_with_projection_20260111_202638"
 echo "Resuming from output directory: $OUTPUT_DIR"
 
-# NCCL settings for multi-node (NCCL_DEBUG unset to suppress all NCCL output)
+# NCCL settings for multi-node
+export NCCL_DEBUG=INFO
 export NCCL_IB_DISABLE=0
 export NCCL_NET_GDR_LEVEL=2
 
@@ -83,14 +84,9 @@ echo "  - psi_fix_order_seed: None (RANDOM)"
 echo "  - psi_vae_only: False (WITH PSI semantic projection)"
 echo "  - psi_use_all_tokens: True (4x features - 32768 dim)"
 echo "Output dir: $OUTPUT_DIR"
-echo "RESUMING FROM: checkpoint-1000"
+echo "RESUMING FROM: latest checkpoint"
 echo "=============================================="
 
-# Create log file with timestamp
-LOG_FILE="${OUTPUT_DIR}/training_resume_$(date +%Y%m%d_%H%M%S)_node${NODE_RANK}.log"
-echo "Logging to: $LOG_FILE"
-
-# Run training with output to both terminal and log file
 accelerate launch \
     --multi_gpu \
     --num_processes $WORLD_SIZE \
@@ -140,7 +136,5 @@ accelerate launch \
     --save_state \
     --report_to="wandb" \
     --tracker_project_name="wan-psi-control" \
-    --resume_from_checkpoint="checkpoint-1000" \
-    2>&1 | tee -a "$LOG_FILE"
+    --resume_from_checkpoint="latest"
 
-echo "Training finished. Log saved to: $LOG_FILE"

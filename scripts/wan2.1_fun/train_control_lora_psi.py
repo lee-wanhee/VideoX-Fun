@@ -690,16 +690,7 @@ def parse_args():
 
 
 def main():
-    import sys
-    print("=" * 80, flush=True)
-    print("[SCRIPT START] train_control_lora_psi.py main() called", flush=True)
-    print(f"[SCRIPT START] sys.argv = {sys.argv}", flush=True)
-    print("=" * 80, flush=True)
-    
     args = parse_args()
-    
-    print(f"[ARGS PARSED] resume_from_checkpoint = '{args.resume_from_checkpoint}'", flush=True)
-    print(f"[ARGS PARSED] output_dir = '{args.output_dir}'", flush=True)
 
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
@@ -1626,12 +1617,7 @@ def main():
     first_epoch = 0
 
     # Potentially load in the weights and states from a previous save
-    print(f"[RESUME DEBUG] resume_from_checkpoint = '{args.resume_from_checkpoint}'", flush=True)
-    print(f"[RESUME DEBUG] output_dir = '{args.output_dir}'", flush=True)
-    
     if args.resume_from_checkpoint:
-        accelerator.print(f"[RESUME DEBUG] Entering checkpoint loading block...")
-        
         if args.resume_from_checkpoint != "latest":
             path = os.path.basename(args.resume_from_checkpoint)
         else:
@@ -1642,68 +1628,95 @@ def main():
             dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
             path = dirs[-1] if len(dirs) > 0 else None
 
-        accelerator.print(f"[RESUME DEBUG] Resolved path = '{path}'")
-        
-        # Verify the checkpoint folder exists
-        checkpoint_folder_path = os.path.join(args.output_dir, path) if path else None
-        accelerator.print(f"[RESUME DEBUG] checkpoint_folder_path = '{checkpoint_folder_path}'")
-        accelerator.print(f"[RESUME DEBUG] os.path.isdir(checkpoint_folder_path) = {os.path.isdir(checkpoint_folder_path) if checkpoint_folder_path else False}")
-        
-        if path is None or not os.path.isdir(checkpoint_folder_path):
-            raise ValueError(
-                f"Checkpoint '{args.resume_from_checkpoint}' does not exist in '{args.output_dir}'. "
-                f"Resolved path: '{checkpoint_folder_path}'. "
-                f"Cannot resume training. Please check the output directory contains valid checkpoint folders."
+        if path is None:
+            accelerator.print(
+                f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
             )
-        
-        accelerator.print(f"[RESUME DEBUG] Checkpoint folder verified to exist!")
-        global_step = int(path.split("-")[1])
-        accelerator.print(f"[RESUME DEBUG] global_step set to {global_step}")
-
-        initial_global_step = global_step
-        accelerator.print(f"[RESUME DEBUG] initial_global_step set to {initial_global_step}")
-
-        pkl_path = os.path.join(checkpoint_folder_path, "sampler_pos_start.pkl")
-        if os.path.exists(pkl_path):
-            with open(pkl_path, 'rb') as file:
-                _, first_epoch = pickle.load(file)
+            args.resume_from_checkpoint = None
+            initial_global_step = 0
         else:
-            first_epoch = global_step // num_update_steps_per_epoch
-        accelerator.print(f"[RESUME DEBUG] first_epoch = {first_epoch}")
+            global_step = int(path.split("-")[1])
 
-        # Use accelerator.load_state() for ALL cases - this triggers the registered
-        # save/load hooks that properly restore LoRA weights, PSI projection, and sampler position
-        accelerator.print(f"[RESUME DEBUG] Calling accelerator.load_state({checkpoint_folder_path})...")
-        try:
-            accelerator.load_state(checkpoint_folder_path)
-            accelerator.print(f"[RESUME DEBUG] accelerator.load_state() completed successfully!")
-        except Exception as e:
-            accelerator.print(f"[RESUME DEBUG] accelerator.load_state() FAILED with error: {e}")
-            raise
-        
-        accelerator.print(f"[RESUME DEBUG] Checkpoint loading complete. Resuming from step {global_step}.")
+            initial_global_step = global_step
+
+            checkpoint_folder_path = os.path.join(args.output_dir, path)
+            pkl_path = os.path.join(checkpoint_folder_path, "sampler_pos_start.pkl")
+            if os.path.exists(pkl_path):
+                with open(pkl_path, 'rb') as file:
+                    _, first_epoch = pickle.load(file)
+            else:
+                first_epoch = global_step // num_update_steps_per_epoch
+            print(f"Load pkl from {pkl_path}. Get first_epoch = {first_epoch}.")
+
+            if zero_stage != 3 and not args.use_fsdp:
+                from safetensors.torch import load_file
+                state_dict = load_file(os.path.join(checkpoint_folder_path, "lora_diffusion_pytorch_model.safetensors"), device=str(accelerator.device))
+                m, u = accelerator.unwrap_model(network).load_state_dict(state_dict, strict=False)
+                print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
+
+                # Load PSI projection model
+                psi_projection_path = os.path.join(checkpoint_folder_path, "psi_projection.safetensors")
+                if os.path.exists(psi_projection_path):
+                    psi_projection_state_dict = load_file(psi_projection_path, device=str(accelerator.device))
+                    m, u = accelerator.unwrap_model(psi_projection).load_state_dict(psi_projection_state_dict, strict=False)
+                    accelerator.print(f"Loaded PSI projection from {psi_projection_path}")
+                    accelerator.print(f"PSI projection - missing keys: {len(m)}, unexpected keys: {len(u)}")
+                else:
+                    accelerator.print(f"PSI projection checkpoint not found at {psi_projection_path}, starting fresh")
+
+                optimizer_file_pt = os.path.join(checkpoint_folder_path, "optimizer.pt")
+                optimizer_file_bin = os.path.join(checkpoint_folder_path, "optimizer.bin")
+                optimizer_file_to_load = None
+
+                if os.path.exists(optimizer_file_pt):
+                    optimizer_file_to_load = optimizer_file_pt
+                elif os.path.exists(optimizer_file_bin):
+                    optimizer_file_to_load = optimizer_file_bin
+
+                if optimizer_file_to_load:
+                    try:
+                        accelerator.print(f"Loading optimizer state from {optimizer_file_to_load}")
+                        optimizer_state = torch.load(optimizer_file_to_load, map_location=accelerator.device)
+                        optimizer.load_state_dict(optimizer_state)
+                        accelerator.print("Optimizer state loaded successfully.")
+                    except Exception as e:
+                        accelerator.print(f"Failed to load optimizer state from {optimizer_file_to_load}: {e}")
+
+                scheduler_file_pt = os.path.join(checkpoint_folder_path, "scheduler.pt")
+                scheduler_file_bin = os.path.join(checkpoint_folder_path, "scheduler.bin")
+                scheduler_file_to_load = None
+
+                if os.path.exists(scheduler_file_pt):
+                    scheduler_file_to_load = scheduler_file_pt
+                elif os.path.exists(scheduler_file_bin):
+                    scheduler_file_to_load = scheduler_file_bin
+
+                if scheduler_file_to_load:
+                    try:
+                        accelerator.print(f"Loading scheduler state from {scheduler_file_to_load}")
+                        scheduler_state = torch.load(scheduler_file_to_load, map_location=accelerator.device)
+                        lr_scheduler.load_state_dict(scheduler_state)
+                        accelerator.print("Scheduler state loaded successfully.")
+                    except Exception as e:
+                        accelerator.print(f"Failed to load scheduler state from {scheduler_file_to_load}: {e}")
+
+                if hasattr(accelerator, 'scaler') and accelerator.scaler is not None:
+                    scaler_file = os.path.join(checkpoint_folder_path, "scaler.pt")
+                    if os.path.exists(scaler_file):
+                        try:
+                            accelerator.print(f"Loading GradScaler state from {scaler_file}")
+                            scaler_state = torch.load(scaler_file, map_location=accelerator.device)
+                            accelerator.scaler.load_state_dict(scaler_state)
+                            accelerator.print("GradScaler state loaded successfully.")
+                        except Exception as e:
+                            accelerator.print(f"Failed to load GradScaler state: {e}")
+
+            else:
+                accelerator.load_state(checkpoint_folder_path)
+                accelerator.print("accelerator.load_state() completed for zero_stage 3.")
 
     else:
-        accelerator.print(f"[RESUME DEBUG] args.resume_from_checkpoint is FALSY, starting from scratch!")
         initial_global_step = 0
-
-    accelerator.print(f"[RESUME DEBUG] === FINAL STATE ===")
-    accelerator.print(f"[RESUME DEBUG] initial_global_step = {initial_global_step}")
-    accelerator.print(f"[RESUME DEBUG] global_step = {global_step}")
-    accelerator.print(f"[RESUME DEBUG] first_epoch = {first_epoch}")
-    accelerator.print(f"[RESUME DEBUG] ===================")
-
-    # STRICT CHECK: If resume was requested, ensure checkpoint was actually loaded
-    if args.resume_from_checkpoint:
-        if initial_global_step == 0:
-            raise ValueError(
-                f"FATAL: --resume_from_checkpoint='{args.resume_from_checkpoint}' was specified, "
-                f"but checkpoint was NOT loaded (initial_global_step=0). "
-                f"output_dir='{args.output_dir}'. "
-                f"This should never happen - check the checkpoint loading logic above."
-            )
-        else:
-            accelerator.print(f"[RESUME DEBUG] SUCCESS! Training will resume from step {initial_global_step}")
 
     # function for saving/removing
     def save_model(ckpt_file, unwrapped_nw):
@@ -1714,20 +1727,6 @@ def main():
             save_file(unwrapped_nw, ckpt_file, metadata={"format": "pt"})
             return ckpt_file
         unwrapped_nw.save_weights(ckpt_file, weight_dtype, None)
-
-    # FINAL SAFETY CHECK: Raise error if resume was requested but we're starting from 0
-    print(f"[PROGRESS BAR] About to create progress bar with initial_global_step={initial_global_step}", flush=True)
-    print(f"[PROGRESS BAR] args.resume_from_checkpoint = '{args.resume_from_checkpoint}'", flush=True)
-    if args.resume_from_checkpoint and initial_global_step == 0:
-        print("FATAL ERROR DETECTED! Raising RuntimeError...", flush=True)
-        raise RuntimeError(
-            f"FATAL ERROR: About to start progress bar at step 0, but resume was requested!\n"
-            f"  --resume_from_checkpoint = '{args.resume_from_checkpoint}'\n"
-            f"  initial_global_step = {initial_global_step}\n"
-            f"  global_step = {global_step}\n"
-            f"  output_dir = '{args.output_dir}'\n"
-            f"Something went wrong with checkpoint loading. STOPPING."
-        )
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
