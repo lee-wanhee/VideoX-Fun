@@ -711,29 +711,64 @@ class WanFunControlPipeline(DiffusionPipeline):
             )  # (B*2, 16, H', W')
             psi_projected = psi_projected_flat.view(B, num_psi_frames, C_latent, H_latent, W_latent)  # (B, 2, 16, H', W')
             
-            # 5. Build sparse control latents
-            # PSI-controlled frames: VAE + psi_projected
-            # Non-controlled frames: mask_embedding
+            # 5. Build control latents
             num_latent_frames = (num_frames - 1) // self.vae.config.temporal_compression_ratio + 1
             mask_embedding = mask_embedding.to(device, weight_dtype)
             
             # Initialize control latents with mask embedding (all frames start as masked)
             control_video_latents = mask_embedding.unsqueeze(2).expand(B, -1, num_latent_frames, -1, -1).clone()
             
+            # Get spatial size for temporal offset embeddings
+            spatial_size = (H_latent, W_latent)
+            
             # Place PSI-controlled frames at correct latent indices
             for bs_idx in range(B):
-                # Frame 0 is always at latent index 0
-                control_video_latents[bs_idx, :, 0, :, :] = (
-                    control_latents_base[bs_idx, 0, :, :, :] +
-                    psi_projected[bs_idx, 0, :, :, :]
-                )
-                
-                # Second frame at computed latent index
                 second_idx = min(second_latent_idx, num_latent_frames - 1)
-                control_video_latents[bs_idx, :, second_idx, :, :] = (
-                    control_latents_base[bs_idx, 1, :, :, :] +
-                    psi_projected[bs_idx, 1, :, :, :]
-                )
+                
+                if psi_temporal_propagation:
+                    # === TEMPORAL PROPAGATION MODE ===
+                    # - Latent 0: PSI frame 0 + temporal_offset(0)
+                    # - Latents 1 to second_idx: PSI frame 1 + temporal_offset(countdown)
+                    # - Latents > second_idx: mask_embedding (no PSI info)
+                    
+                    # Latent 0: PSI frame 0 with offset=0 (at target)
+                    temporal_emb_0 = self.psi_projection.get_temporal_offset_embedding(
+                        offset=0, spatial_size=spatial_size
+                    ).squeeze(0)  # (C, H, W)
+                    control_video_latents[bs_idx, :, 0, :, :] = (
+                        control_latents_base[bs_idx, 0, :, :, :] +
+                        psi_projected[bs_idx, 0, :, :, :] +
+                        temporal_emb_0
+                    )
+                    
+                    # Latents 1 to second_idx (inclusive): PSI frame 1 with countdown offset
+                    for t_idx in range(1, second_idx + 1):
+                        offset = second_idx - t_idx  # countdown: 3, 2, 1, 0
+                        temporal_emb = self.psi_projection.get_temporal_offset_embedding(
+                            offset=offset, spatial_size=spatial_size
+                        ).squeeze(0)  # (C, H, W)
+                        control_video_latents[bs_idx, :, t_idx, :, :] = (
+                            control_latents_base[bs_idx, 1, :, :, :] +
+                            psi_projected[bs_idx, 1, :, :, :] +
+                            temporal_emb
+                        )
+                    
+                    # Latents > second_idx: remain as mask_embedding (already initialized)
+                else:
+                    # === SPARSE MODE (original behavior) ===
+                    # Only latent 0 and second_idx get PSI info, others stay masked
+                    
+                    # Frame 0 is always at latent index 0
+                    control_video_latents[bs_idx, :, 0, :, :] = (
+                        control_latents_base[bs_idx, 0, :, :, :] +
+                        psi_projected[bs_idx, 0, :, :, :]
+                    )
+                    
+                    # Second frame at computed latent index
+                    control_video_latents[bs_idx, :, second_idx, :, :] = (
+                        control_latents_base[bs_idx, 1, :, :, :] +
+                        psi_projected[bs_idx, 1, :, :, :]
+                    )
             
             # Note: ref_image for control_ref mode should be passed as start_image parameter
             # The pipeline's start_image_latentes_conv_in handling is equivalent to training's ref_latents_conv_in

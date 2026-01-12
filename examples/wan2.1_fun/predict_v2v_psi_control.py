@@ -455,6 +455,13 @@ def parse_args():
         help="Use all 4 content tokens per patch for PSI feature extraction (4x more features). "
              "Must match the setting used during training."
     )
+    parser.add_argument(
+        "--psi_temporal_propagation",
+        action="store_true",
+        help="Enable temporal-aware PSI propagation. Propagates PSI frame 1 info to all intermediate "
+             "latents (1 to second_latent_idx) with temporal offset embeddings. "
+             "Must match the setting used during training."
+    )
     return parser.parse_args()
 
 
@@ -480,6 +487,8 @@ def main():
     print(f"  Checkpoint name: {run_checkpoint_name}")
     print(f"  Output path: {run_save_path}")
     print(f"  Seeds: {run_seeds} ({len(run_seeds)} runs)")
+    print(f"  PSI use_all_tokens: {args.psi_use_all_tokens}")
+    print(f"  PSI temporal_propagation: {args.psi_temporal_propagation}")
     print("=" * 60)
 
     print("=" * 60)
@@ -705,6 +714,7 @@ def main():
                 psi_time_gap_sec=psi_time_gap_sec,  # Time gap between frames
                 psi_second_latent_idx=psi_second_latent_idx,  # Latent index for second frame
                 psi_seed=run_seed,  # Seed for PSI mask generation
+                psi_temporal_propagation=args.psi_temporal_propagation,  # Temporal-aware propagation
                 start_image=start_image_tensor,  # First frame as reference (matching training's ref_latents_conv_in)
                 clip_image=clip_image,  # First frame used for CLIP conditioning
             ).videos
