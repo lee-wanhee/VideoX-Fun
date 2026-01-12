@@ -1651,8 +1651,14 @@ def main():
             if zero_stage != 3 and not args.use_fsdp:
                 from safetensors.torch import load_file
                 state_dict = load_file(os.path.join(checkpoint_folder_path, "lora_diffusion_pytorch_model.safetensors"), device=str(accelerator.device))
-                m, u = accelerator.unwrap_model(network).load_state_dict(state_dict, strict=False)
-                print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
+                if args.use_peft_lora:
+                    # For PEFT LoRA, load into transformer3d which has the adapters injected
+                    from peft import set_peft_model_state_dict
+                    set_peft_model_state_dict(accelerator.unwrap_model(transformer3d), state_dict)
+                    print(f"Loaded PEFT LoRA state dict into transformer3d")
+                else:
+                    m, u = accelerator.unwrap_model(network).load_state_dict(state_dict, strict=False)
+                    print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
 
                 # Load PSI projection model
                 psi_projection_path = os.path.join(checkpoint_folder_path, "psi_projection.safetensors")

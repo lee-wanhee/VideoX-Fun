@@ -445,6 +445,17 @@ class ImageVideoControlDataset(Dataset):
                         # Compute actual time gap in seconds
                         time_gap_sec = (second_frame_idx - first_frame_idx) / fps
                         
+                        # IMPORTANT: PSI uses round(time_code_ms/200) for temporal indexing.
+                        # Due to Python's banker's rounding, time gaps < 200ms can map both
+                        # frames to the same temporal index, causing PSI to return only 1 frame.
+                        # Enforce minimum 200ms (0.2s) separation.
+                        if time_gap_sec < 0.2:
+                            raise ValueError(
+                                f"Video too short for PSI: time_gap={time_gap_sec:.3f}s < 0.2s minimum. "
+                                f"fps={fps}, first_frame={first_frame_idx}, second_frame={second_frame_idx}, "
+                                f"video_length={len(control_video_reader)}"
+                            )
+                        
                         psi_indices = [first_frame_idx, second_frame_idx]
                         
                         sample_args = (control_video_reader, psi_indices)
