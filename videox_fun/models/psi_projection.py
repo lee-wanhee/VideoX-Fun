@@ -1,6 +1,87 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+class TemporalOffsetEmbedding(nn.Module):
+    """
+    Temporal offset embedding using sinusoidal encoding → MLP.
+    
+    Encodes the "frames until target" offset using sinusoidal positional encoding,
+    then projects to latent channels. This allows the model to understand temporal
+    position when receiving propagated PSI control signals.
+    
+    For autoregressive rollout:
+    - offset=0 means "I'm at the target frame"
+    - offset=3 means "target frame is 3 latent frames ahead"
+    """
+    def __init__(self, n_output_channels, sin_dim=32, hidden_dim=64):
+        super().__init__()
+        self.n_output_channels = n_output_channels
+        self.sin_dim = sin_dim
+        
+        # Project sinusoidal features to output channels
+        self.offset_proj = nn.Sequential(
+            nn.Linear(sin_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, n_output_channels),
+        )
+        
+        self.init_weights()
+    
+    def init_weights(self):
+        # Zero-init final layer for gradual learning
+        nn.init.zeros_(self.offset_proj[-1].weight)
+        nn.init.zeros_(self.offset_proj[-1].bias)
+    
+    def get_sinusoidal_emb(self, offset, device, dtype):
+        """
+        Generate sinusoidal embedding for offset value.
+        
+        Args:
+            offset: int, the temporal offset (frames until target)
+            device: torch device
+            dtype: torch dtype
+            
+        Returns:
+            Sinusoidal embedding of shape (1, sin_dim)
+        """
+        half_dim = self.sin_dim // 2
+        emb_scale = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device, dtype=dtype) * -emb_scale)
+        
+        offset_tensor = torch.tensor([offset], device=device, dtype=dtype)
+        emb = offset_tensor[:, None] * emb[None, :]  # (1, half_dim)
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)  # (1, sin_dim)
+        
+        return emb
+    
+    def forward(self, offset, spatial_size, device, dtype):
+        """
+        Generate temporal offset embedding.
+        
+        Args:
+            offset: int, frames until target (0 = at target)
+            spatial_size: tuple (H, W) for spatial dimensions
+            device: torch device
+            dtype: torch dtype
+            
+        Returns:
+            Temporal embedding of shape (1, n_output_channels, H, W)
+        """
+        # Get sinusoidal embedding
+        sin_emb = self.get_sinusoidal_emb(offset, device, dtype)  # (1, sin_dim)
+        
+        # Project to output channels
+        emb = self.offset_proj(sin_emb)  # (1, n_output_channels)
+        
+        # Reshape for spatial broadcasting: (1, C) -> (1, C, 1, 1) -> (1, C, H, W)
+        H, W = spatial_size
+        emb = emb.view(1, self.n_output_channels, 1, 1).expand(1, -1, H, W)
+        
+        return emb
+
 
 class ChannelRMSNorm2d(nn.Module):
     """
@@ -84,14 +165,17 @@ class MaskEmbeddingProjection(nn.Module):
 
 class PSIProjectionSwiGLU(nn.Module):
     """
-    PSI feature projection with optional mask embedding.
+    PSI feature projection with optional mask embedding and temporal offset encoding.
     
     Projects PSI semantic features to latent space (16 dim).
     - Coarse mode (use_all_tokens=False): 8192 input channels (4096 hidden + 4096 embeddings)
     - All tokens mode (use_all_tokens=True): 32768 input channels (4 * (4096 hidden + 4096 embeddings))
     
-    Also includes a learnable mask embedding for non-PSI-controlled frames.
-    Both are zero-initialized for gradual learning.
+    Also includes:
+    - Learnable mask embedding for non-PSI-controlled frames
+    - Temporal offset embedding for propagated PSI control signals
+    
+    All are zero-initialized for gradual learning.
     """
     def __init__(self, n_input_channels, n_hidden_channels, n_output_channels, pdrop=0.0, eps=1e-6):
         super().__init__()
@@ -113,6 +197,14 @@ class PSIProjectionSwiGLU(nn.Module):
             n_output_channels=n_output_channels,
             pdrop=pdrop
         )
+        
+        # Temporal offset embedding for propagated PSI control
+        # Encodes "frames until target" for autoregressive rollout
+        self.temporal_offset_embedding = TemporalOffsetEmbedding(
+            n_output_channels=n_output_channels,
+            sin_dim=32,
+            hidden_dim=64
+        )
 
         self.init_weights()
 
@@ -131,6 +223,29 @@ class PSIProjectionSwiGLU(nn.Module):
     def dtype(self):
         """Return the dtype of the model (required by diffusers pipeline)."""
         return self.proj_up.weight.dtype
+    
+    @property
+    def device(self):
+        """Return the device of the model."""
+        return self.proj_up.weight.device
+
+    def get_temporal_offset_embedding(self, offset, spatial_size):
+        """
+        Get temporal offset embedding for a given offset value.
+        
+        Args:
+            offset: int, frames until target (0 = at target frame)
+            spatial_size: tuple (H, W) for spatial dimensions
+            
+        Returns:
+            Temporal embedding of shape (1, n_output_channels, H, W)
+        """
+        return self.temporal_offset_embedding(
+            offset=offset,
+            spatial_size=spatial_size,
+            device=self.device,
+            dtype=self.dtype
+        )
 
     def forward(self, x, return_mask_embedding=False, mask_spatial_size=None):
         """
