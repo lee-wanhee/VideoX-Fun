@@ -84,7 +84,7 @@ echo "  - psi_fix_order_seed: None (RANDOM)"
 echo "  - psi_vae_only: False (WITH PSI semantic projection)"
 echo "  - psi_use_all_tokens: True (4x features - 32768 dim)"
 echo "Output dir: $OUTPUT_DIR"
-echo "RESUMING FROM: latest checkpoint"
+echo "RESUMING FROM: checkpoint-1000"
 echo "=============================================="
 
 accelerate launch \
@@ -136,5 +136,5 @@ accelerate launch \
     --save_state \
     --report_to="wandb" \
     --tracker_project_name="wan-psi-control" \
-    --resume_from_checkpoint="latest"
+    --resume_from_checkpoint="checkpoint-1000"
 

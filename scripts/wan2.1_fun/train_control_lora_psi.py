@@ -1629,11 +1629,10 @@ def main():
             path = dirs[-1] if len(dirs) > 0 else None
 
         if path is None:
-            accelerator.print(
-                f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
+            raise ValueError(
+                f"Checkpoint '{args.resume_from_checkpoint}' does not exist in '{args.output_dir}'. "
+                f"Cannot resume training. Please check the output directory contains valid checkpoint folders."
             )
-            args.resume_from_checkpoint = None
-            initial_global_step = 0
         else:
             global_step = int(path.split("-")[1])
 
