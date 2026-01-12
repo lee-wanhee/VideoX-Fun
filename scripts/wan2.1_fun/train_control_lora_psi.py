@@ -1748,8 +1748,8 @@ def main():
         train_loss = 0.0
         batch_sampler.sampler.generator = torch.Generator().manual_seed(args.seed + epoch)
         for step, batch in enumerate(train_dataloader):
-            # Data batch sanity check
-            if epoch == first_epoch and step == 0:
+            # Data batch sanity check (only on main process)
+            if epoch == first_epoch and step == 0 and accelerator.is_main_process:
                 pixel_values, texts = batch['pixel_values'].cpu(), batch['text']
                 control_pixel_values = batch["control_pixel_values"].cpu()
                 pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
