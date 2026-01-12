@@ -86,6 +86,11 @@ echo "Output dir: $OUTPUT_DIR"
 echo "RESUMING FROM: checkpoint-1000"
 echo "=============================================="
 
+# Create log file with timestamp
+LOG_FILE="${OUTPUT_DIR}/training_resume_$(date +%Y%m%d_%H%M%S)_node${NODE_RANK}.log"
+echo "Logging to: $LOG_FILE"
+
+# Run training with output to both terminal and log file
 accelerate launch \
     --multi_gpu \
     --num_processes $WORLD_SIZE \
@@ -135,5 +140,7 @@ accelerate launch \
     --save_state \
     --report_to="wandb" \
     --tracker_project_name="wan-psi-control" \
-    --resume_from_checkpoint="checkpoint-1000"
+    --resume_from_checkpoint="checkpoint-1000" \
+    2>&1 | tee -a "$LOG_FILE"
 
+echo "Training finished. Log saved to: $LOG_FILE"
