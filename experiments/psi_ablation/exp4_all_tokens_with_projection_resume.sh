@@ -111,7 +111,7 @@ accelerate launch \
     --gradient_accumulation_steps=$GRADIENT_ACCUMULATION_STEPS \
     --dataloader_num_workers=8 \
     --max_train_steps=20000 \
-    --checkpointing_steps=1000 \
+    --checkpointing_steps=500 \
     --learning_rate=1e-05 \
     --seed=123 \
     --output_dir=$OUTPUT_DIR \
