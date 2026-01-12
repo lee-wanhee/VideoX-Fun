@@ -676,6 +676,11 @@ def parse_args():
         help="If set, use all 4 content tokens per patch for PSI feature extraction (4x more features, better decoded frames). "
              "Feature dim: 32768 instead of 8192. Requires different projection layer input size."
     )
+    parser.add_argument(
+        "--psi_temporal_propagation", action="store_true",
+        help="If set, propagate PSI frame 1 info to all intermediate latents (1 to second_latent_idx) with temporal offset embeddings. "
+             "This gives the model 'advance notice' of the target frame with countdown information for autoregressive rollout."
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -2078,10 +2083,7 @@ def main():
                         # Reshape back: (B*2, 16, H', W') -> (B, 2, 16, H', W')
                         psi_projected = psi_projected_flat.view(B, num_psi_frames, C_latent, H_latent, W_latent)
                     
-                    # 5. Build control latents with temporal-aware PSI propagation
-                    # - Latent 0: PSI frame 0 + temporal_offset(0)
-                    # - Latents 1 to second_latent_idx: PSI frame 1 + temporal_offset(countdown)
-                    # - Latents > second_latent_idx: mask_embedding (no PSI info)
+                    # 5. Build control latents
                     mask_embedding = mask_embedding.to(latents.device, latents.dtype)
                     
                     # Initialize control latents with mask embedding (all frames start as masked)
@@ -2090,7 +2092,7 @@ def main():
                     # Get spatial size for temporal offset embeddings
                     spatial_size = (H_latent, W_latent)
                     
-                    # For each sample, place PSI-controlled frames with temporal offsets
+                    # For each sample, place PSI-controlled frames
                     for bs_index in range(B):
                         # Get second frame latent index from metadata
                         if psi_control_meta is not None and len(psi_control_meta) > bs_index:
@@ -2101,30 +2103,51 @@ def main():
                         # Clamp to valid range
                         second_latent_idx = min(second_latent_idx, num_latent_frames - 1)
                         
-                        # Latent 0: PSI frame 0 with offset=0 (at target)
-                        temporal_emb_0 = psi_projection.get_temporal_offset_embedding(
-                            offset=0, spatial_size=spatial_size
-                        ).squeeze(0)  # (C, H, W)
-                        psi_control_latents[bs_index, :, 0, :, :] = (
-                            control_latents_base[bs_index, 0, :, :, :] +  # VAE(decoded_frame_0)
-                            psi_projected[bs_index, 0, :, :, :] +  # psi_projected_0
-                            temporal_emb_0  # temporal offset embedding
-                        )
-                        
-                        # Latents 1 to second_latent_idx (inclusive): PSI frame 1 with countdown offset
-                        # offset = second_latent_idx - current_idx (frames until target)
-                        for t_idx in range(1, second_latent_idx + 1):
-                            offset = second_latent_idx - t_idx  # countdown: 3, 2, 1, 0
-                            temporal_emb = psi_projection.get_temporal_offset_embedding(
-                                offset=offset, spatial_size=spatial_size
+                        if args.psi_temporal_propagation:
+                            # === TEMPORAL PROPAGATION MODE ===
+                            # - Latent 0: PSI frame 0 + temporal_offset(0)
+                            # - Latents 1 to second_latent_idx: PSI frame 1 + temporal_offset(countdown)
+                            # - Latents > second_latent_idx: mask_embedding (no PSI info)
+                            
+                            # Latent 0: PSI frame 0 with offset=0 (at target)
+                            temporal_emb_0 = psi_projection.get_temporal_offset_embedding(
+                                offset=0, spatial_size=spatial_size
                             ).squeeze(0)  # (C, H, W)
-                            psi_control_latents[bs_index, :, t_idx, :, :] = (
-                                control_latents_base[bs_index, 1, :, :, :] +  # VAE(decoded_frame_1)
-                                psi_projected[bs_index, 1, :, :, :] +  # psi_projected_1
-                                temporal_emb  # temporal offset embedding
+                            psi_control_latents[bs_index, :, 0, :, :] = (
+                                control_latents_base[bs_index, 0, :, :, :] +  # VAE(decoded_frame_0)
+                                psi_projected[bs_index, 0, :, :, :] +  # psi_projected_0
+                                temporal_emb_0  # temporal offset embedding
                             )
-                        
-                        # Latents > second_latent_idx: remain as mask_embedding (already initialized)
+                            
+                            # Latents 1 to second_latent_idx (inclusive): PSI frame 1 with countdown offset
+                            # offset = second_latent_idx - current_idx (frames until target)
+                            for t_idx in range(1, second_latent_idx + 1):
+                                offset = second_latent_idx - t_idx  # countdown: 3, 2, 1, 0
+                                temporal_emb = psi_projection.get_temporal_offset_embedding(
+                                    offset=offset, spatial_size=spatial_size
+                                ).squeeze(0)  # (C, H, W)
+                                psi_control_latents[bs_index, :, t_idx, :, :] = (
+                                    control_latents_base[bs_index, 1, :, :, :] +  # VAE(decoded_frame_1)
+                                    psi_projected[bs_index, 1, :, :, :] +  # psi_projected_1
+                                    temporal_emb  # temporal offset embedding
+                                )
+                            
+                            # Latents > second_latent_idx: remain as mask_embedding (already initialized)
+                        else:
+                            # === SPARSE MODE (original behavior) ===
+                            # Only latent 0 and second_latent_idx get PSI info, others stay masked
+                            
+                            # Latent 0: PSI frame 0
+                            psi_control_latents[bs_index, :, 0, :, :] = (
+                                control_latents_base[bs_index, 0, :, :, :] +  # VAE(decoded_frame_0)
+                                psi_projected[bs_index, 0, :, :, :]  # psi_projected_0
+                            )
+                            
+                            # second_latent_idx: PSI frame 1
+                            psi_control_latents[bs_index, :, second_latent_idx, :, :] = (
+                                control_latents_base[bs_index, 1, :, :, :] +  # VAE(decoded_frame_1)
+                                psi_projected[bs_index, 1, :, :, :]  # psi_projected_1
+                            )
                     
                     # 6. Make PSI control latents to zero (with probability) - for classifier-free guidance
                     for bs_index in range(psi_control_latents.size()[0]):

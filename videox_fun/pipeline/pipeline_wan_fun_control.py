@@ -483,6 +483,7 @@ class WanFunControlPipeline(DiffusionPipeline):
         psi_time_gap_sec: Optional[float] = None,
         psi_second_latent_idx: Optional[int] = None,
         psi_seed: Optional[int] = None,
+        psi_temporal_propagation: bool = False,
         start_image: Union[torch.FloatTensor] = None,
         ref_image: Union[torch.FloatTensor] = None,
         num_frames: int = 49,
