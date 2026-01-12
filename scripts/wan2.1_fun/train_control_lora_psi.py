@@ -2065,12 +2065,35 @@ def main():
                         # 3. Project PSI semantic features for BOTH frames (trainable)
                         # Reshape: (B, 2, D, 32, 32) -> (B*2, D, 32, 32) where D=8192 or 32768
                         psi_semantic_flat = psi_semantic_features.view(B * num_psi_frames, -1, 32, 32)
-                        # Also get mask embedding at target spatial size
-                        psi_projected_flat, mask_embedding = psi_projection(
+                        
+                        # Determine which temporal offsets we need (for temporal propagation mode)
+                        temporal_offsets = None
+                        if args.psi_temporal_propagation:
+                            # Find max second_latent_idx across all samples to determine max offset
+                            max_second_latent_idx = 1
+                            for bs_idx in range(B):
+                                if psi_control_meta is not None and len(psi_control_meta) > bs_idx:
+                                    idx = psi_control_meta[bs_idx].get('second_frame_latent_idx', 1)
+                                else:
+                                    idx = 1
+                                idx = min(idx, num_latent_frames - 1)
+                                max_second_latent_idx = max(max_second_latent_idx, idx)
+                            # Request all offsets from 0 to max_second_latent_idx (inclusive)
+                            temporal_offsets = list(range(max_second_latent_idx + 1))
+                        
+                        # Forward pass with optional temporal embeddings
+                        psi_output = psi_projection(
                             psi_semantic_flat, 
                             return_mask_embedding=True,
-                            mask_spatial_size=(H_latent, W_latent)
-                        )  # (B*2, 16, 32, 32), (1, 16, H', W')
+                            mask_spatial_size=(H_latent, W_latent),
+                            temporal_offsets=temporal_offsets,
+                            temporal_spatial_size=(H_latent, W_latent) if temporal_offsets else None
+                        )
+                        
+                        # Unpack output
+                        psi_projected_flat = psi_output['projected']  # (B*2, 16, 32, 32)
+                        mask_embedding = psi_output['mask_embedding']  # (1, 16, H', W')
+                        temporal_embeddings = psi_output.get('temporal_embeddings', {})  # dict: offset -> (1, 16, H', W')
                         
                         # 4. Upsample PSI features to match VAE latent spatial size
                         psi_projected_flat = F.interpolate(
@@ -2088,9 +2111,6 @@ def main():
                     
                     # Initialize control latents with mask embedding (all frames start as masked)
                     psi_control_latents = mask_embedding.unsqueeze(2).expand(B, -1, num_latent_frames, -1, -1).clone()
-                    
-                    # Get spatial size for temporal offset embeddings
-                    spatial_size = (H_latent, W_latent)
                     
                     # For each sample, place PSI-controlled frames
                     for bs_index in range(B):
@@ -2110,9 +2130,7 @@ def main():
                             # - Latents > second_latent_idx: mask_embedding (no PSI info)
                             
                             # Latent 0: PSI frame 0 with offset=0 (at target)
-                            temporal_emb_0 = psi_projection.get_temporal_offset_embedding(
-                                offset=0, spatial_size=spatial_size
-                            ).squeeze(0)  # (C, H, W)
+                            temporal_emb_0 = temporal_embeddings[0].squeeze(0)  # (C, H, W)
                             psi_control_latents[bs_index, :, 0, :, :] = (
                                 control_latents_base[bs_index, 0, :, :, :] +  # VAE(decoded_frame_0)
                                 psi_projected[bs_index, 0, :, :, :] +  # psi_projected_0
@@ -2123,9 +2141,7 @@ def main():
                             # offset = second_latent_idx - current_idx (frames until target)
                             for t_idx in range(1, second_latent_idx + 1):
                                 offset = second_latent_idx - t_idx  # countdown: 3, 2, 1, 0
-                                temporal_emb = psi_projection.get_temporal_offset_embedding(
-                                    offset=offset, spatial_size=spatial_size
-                                ).squeeze(0)  # (C, H, W)
+                                temporal_emb = temporal_embeddings[offset].squeeze(0)  # (C, H, W)
                                 psi_control_latents[bs_index, :, t_idx, :, :] = (
                                     control_latents_base[bs_index, 1, :, :, :] +  # VAE(decoded_frame_1)
                                     psi_projected[bs_index, 1, :, :, :] +  # psi_projected_1

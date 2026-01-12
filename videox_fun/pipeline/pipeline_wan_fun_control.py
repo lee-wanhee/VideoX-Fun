@@ -694,13 +694,26 @@ class WanFunControlPipeline(DiffusionPipeline):
             control_latents_base = torch.stack(control_latents_list, dim=1)
             _, _, C_latent, H_latent, W_latent = control_latents_base.shape
             
-            # 3. Project PSI features for BOTH frames (also get mask embedding)
+            # 3. Project PSI features for BOTH frames (also get mask embedding and temporal embeddings)
             psi_semantic_flat = psi_semantic_features.view(B * num_psi_frames, -1, 32, 32)
-            psi_projected_flat, mask_embedding = self.psi_projection(
+            num_latent_frames = (num_frames - 1) // self.vae.config.temporal_compression_ratio + 1
+            second_idx = min(second_latent_idx, num_latent_frames - 1)
+            
+            # Determine which temporal offsets we need
+            temporal_offsets = list(range(second_idx + 1)) if psi_temporal_propagation else None
+            
+            psi_output = self.psi_projection(
                 psi_semantic_flat,
                 return_mask_embedding=True,
-                mask_spatial_size=(H_latent, W_latent)
-            )  # (B*2, 16, 32, 32), (1, 16, H', W')
+                mask_spatial_size=(H_latent, W_latent),
+                temporal_offsets=temporal_offsets,
+                temporal_spatial_size=(H_latent, W_latent) if temporal_offsets else None
+            )
+            
+            # Unpack output
+            psi_projected_flat = psi_output['projected']  # (B*2, 16, 32, 32)
+            mask_embedding = psi_output['mask_embedding']  # (1, 16, H', W')
+            temporal_embeddings = psi_output.get('temporal_embeddings', {})  # dict: offset -> (1, 16, H', W')
             
             # 4. Upsample to match VAE latent spatial size
             psi_projected_flat = F.interpolate(
@@ -712,19 +725,13 @@ class WanFunControlPipeline(DiffusionPipeline):
             psi_projected = psi_projected_flat.view(B, num_psi_frames, C_latent, H_latent, W_latent)  # (B, 2, 16, H', W')
             
             # 5. Build control latents
-            num_latent_frames = (num_frames - 1) // self.vae.config.temporal_compression_ratio + 1
             mask_embedding = mask_embedding.to(device, weight_dtype)
             
             # Initialize control latents with mask embedding (all frames start as masked)
             control_video_latents = mask_embedding.unsqueeze(2).expand(B, -1, num_latent_frames, -1, -1).clone()
             
-            # Get spatial size for temporal offset embeddings
-            spatial_size = (H_latent, W_latent)
-            
             # Place PSI-controlled frames at correct latent indices
             for bs_idx in range(B):
-                second_idx = min(second_latent_idx, num_latent_frames - 1)
-                
                 if psi_temporal_propagation:
                     # === TEMPORAL PROPAGATION MODE ===
                     # - Latent 0: PSI frame 0 + temporal_offset(0)
@@ -732,9 +739,7 @@ class WanFunControlPipeline(DiffusionPipeline):
                     # - Latents > second_idx: mask_embedding (no PSI info)
                     
                     # Latent 0: PSI frame 0 with offset=0 (at target)
-                    temporal_emb_0 = self.psi_projection.get_temporal_offset_embedding(
-                        offset=0, spatial_size=spatial_size
-                    ).squeeze(0)  # (C, H, W)
+                    temporal_emb_0 = temporal_embeddings[0].squeeze(0)  # (C, H, W)
                     control_video_latents[bs_idx, :, 0, :, :] = (
                         control_latents_base[bs_idx, 0, :, :, :] +
                         psi_projected[bs_idx, 0, :, :, :] +
@@ -744,9 +749,7 @@ class WanFunControlPipeline(DiffusionPipeline):
                     # Latents 1 to second_idx (inclusive): PSI frame 1 with countdown offset
                     for t_idx in range(1, second_idx + 1):
                         offset = second_idx - t_idx  # countdown: 3, 2, 1, 0
-                        temporal_emb = self.psi_projection.get_temporal_offset_embedding(
-                            offset=offset, spatial_size=spatial_size
-                        ).squeeze(0)  # (C, H, W)
+                        temporal_emb = temporal_embeddings[offset].squeeze(0)  # (C, H, W)
                         control_video_latents[bs_idx, :, t_idx, :, :] = (
                             control_latents_base[bs_idx, 1, :, :, :] +
                             psi_projected[bs_idx, 1, :, :, :] +

@@ -247,7 +247,8 @@ class PSIProjectionSwiGLU(nn.Module):
             dtype=self.dtype
         )
 
-    def forward(self, x, return_mask_embedding=False, mask_spatial_size=None):
+    def forward(self, x, return_mask_embedding=False, mask_spatial_size=None,
+                temporal_offsets=None, temporal_spatial_size=None):
         """
         Project PSI features to latent space.
         
@@ -256,14 +257,19 @@ class PSIProjectionSwiGLU(nn.Module):
             return_mask_embedding: If True, also return the mask embedding for non-PSI frames
             mask_spatial_size: Optional tuple (H, W) for mask embedding size. 
                               If None, uses same size as output.
+            temporal_offsets: Optional list of int offsets to compute temporal embeddings for.
+                             Used for temporal-aware PSI propagation.
+            temporal_spatial_size: Optional tuple (H, W) for temporal embeddings.
+                                  Required if temporal_offsets is provided.
             
         Returns:
-            If return_mask_embedding=False:
+            If return_mask_embedding=False and temporal_offsets=None:
                 Projected features of shape (B, n_output_channels, H, W)
-            If return_mask_embedding=True:
-                Tuple of (projected_features, mask_embedding)
-                - projected_features: (B, n_output_channels, H, W)
-                - mask_embedding: (1, n_output_channels, H_mask, W_mask) 
+            If return_mask_embedding=True or temporal_offsets is not None:
+                Dict containing:
+                - 'projected': Projected features (B, n_output_channels, H, W)
+                - 'mask_embedding': (1, n_output_channels, H, W) if return_mask_embedding=True
+                - 'temporal_embeddings': dict mapping offset -> (1, C, H, W) if temporal_offsets provided
         """
         x = self.norm(x)                 # (B, Cin, H, W)
 
@@ -275,13 +281,33 @@ class PSIProjectionSwiGLU(nn.Module):
         x = self.proj_down(x)            # (B, Cout, H, W)
         x = self.drop(x)
         
+        # If neither optional output is requested, return simple tensor (backward compatible)
+        if not return_mask_embedding and temporal_offsets is None:
+            return x
+        
+        # Build output dict
+        output = {'projected': x}
+        
         if return_mask_embedding:
             # Get spatial size for mask embedding
             if mask_spatial_size is not None:
                 h, w = mask_spatial_size
             else:
                 h, w = x.shape[-2], x.shape[-1]
-            mask_embedding = self.mask_projection((h, w))
-            return x, mask_embedding
+            output['mask_embedding'] = self.mask_projection((h, w))
         
-        return x
+        if temporal_offsets is not None:
+            # Compute temporal embeddings for all requested offsets
+            # This goes through forward pass so DDP handles gradients correctly
+            assert temporal_spatial_size is not None, "temporal_spatial_size required when temporal_offsets provided"
+            temporal_embs = {}
+            for offset in temporal_offsets:
+                temporal_embs[offset] = self.temporal_offset_embedding(
+                    offset=offset,
+                    spatial_size=temporal_spatial_size,
+                    device=self.device,
+                    dtype=self.dtype
+                )
+            output['temporal_embeddings'] = temporal_embs
+        
+        return output
