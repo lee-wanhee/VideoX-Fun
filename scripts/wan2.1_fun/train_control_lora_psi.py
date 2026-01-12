@@ -1628,17 +1628,20 @@ def main():
             dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
             path = dirs[-1] if len(dirs) > 0 else None
 
-        if path is None:
+        # Verify the checkpoint folder exists
+        checkpoint_folder_path = os.path.join(args.output_dir, path) if path else None
+        if path is None or not os.path.isdir(checkpoint_folder_path):
             raise ValueError(
                 f"Checkpoint '{args.resume_from_checkpoint}' does not exist in '{args.output_dir}'. "
+                f"Resolved path: '{checkpoint_folder_path}'. "
                 f"Cannot resume training. Please check the output directory contains valid checkpoint folders."
             )
         else:
+            accelerator.print(f"Resuming from checkpoint: {checkpoint_folder_path}")
             global_step = int(path.split("-")[1])
 
             initial_global_step = global_step
 
-            checkpoint_folder_path = os.path.join(args.output_dir, path)
             pkl_path = os.path.join(checkpoint_folder_path, "sampler_pos_start.pkl")
             if os.path.exists(pkl_path):
                 with open(pkl_path, 'rb') as file:
