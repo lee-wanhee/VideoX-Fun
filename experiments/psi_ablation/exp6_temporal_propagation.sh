@@ -79,7 +79,7 @@ export NCCL_NET_GDR_LEVEL=2
 
 # Multi-node configuration: 4 nodes x 8 GPUs = 32 GPUs total
 export MASTER_PORT=45682
-NNODES=4
+NNODES=2
 GPUS_PER_NODE=8
 WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 
@@ -92,7 +92,7 @@ echo "Experiment 6: Temporal-Aware PSI Propagation"
 echo "=============================================="
 echo "MASTER_ADDR: $MASTER_ADDR"
 echo "MASTER_PORT: $MASTER_PORT"
-echo "WORLD_SIZE: $WORLD_SIZE (4 nodes × 8 GPUs)"
+echo "WORLD_SIZE: $WORLD_SIZE (2 nodes × 8 GPUs)"
 echo "NODE_RANK: $NODE_RANK"
 echo "Effective batch size: 128 (${TRAIN_BATCH_SIZE} × ${GRADIENT_ACCUMULATION_STEPS} grad_accum × ${WORLD_SIZE} GPUs)"
 echo "PSI Settings:"
