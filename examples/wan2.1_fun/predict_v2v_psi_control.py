@@ -548,10 +548,12 @@ def main():
     print("Loading PSI Projection...")
     psi_feature_dim = psi_control_extractor.feature_dim
     print(f"  PSI feature dimension: {psi_feature_dim} (use_all_tokens={args.psi_use_all_tokens})")
+    print(f"  Temporal embedding enabled: {args.psi_temporal_propagation}")
     psi_projection = PSIProjectionSwiGLU(
         n_input_channels=psi_feature_dim, 
         n_hidden_channels=256, 
-        n_output_channels=16
+        n_output_channels=16,
+        enable_temporal_embedding=args.psi_temporal_propagation
     ).to(weight_dtype)
     
     if run_psi_projection_path is not None:

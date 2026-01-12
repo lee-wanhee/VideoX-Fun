@@ -173,14 +173,16 @@ class PSIProjectionSwiGLU(nn.Module):
     
     Also includes:
     - Learnable mask embedding for non-PSI-controlled frames
-    - Temporal offset embedding for propagated PSI control signals
+    - Temporal offset embedding for propagated PSI control signals (optional)
     
     All are zero-initialized for gradual learning.
     """
-    def __init__(self, n_input_channels, n_hidden_channels, n_output_channels, pdrop=0.0, eps=1e-6):
+    def __init__(self, n_input_channels, n_hidden_channels, n_output_channels, pdrop=0.0, eps=1e-6,
+                 enable_temporal_embedding=False):
         super().__init__()
         
         self.n_output_channels = n_output_channels
+        self.enable_temporal_embedding = enable_temporal_embedding
 
         # PSI feature projection (pre-norm on input channels)
         self.norm = ChannelRMSNorm2d(n_input_channels, eps=eps, scale=True)
@@ -198,13 +200,16 @@ class PSIProjectionSwiGLU(nn.Module):
             pdrop=pdrop
         )
         
-        # Temporal offset embedding for propagated PSI control
-        # Encodes "frames until target" for autoregressive rollout
-        self.temporal_offset_embedding = TemporalOffsetEmbedding(
-            n_output_channels=n_output_channels,
-            sin_dim=32,
-            hidden_dim=64
-        )
+        # Temporal offset embedding for propagated PSI control (optional)
+        # Only created when enable_temporal_embedding=True to avoid unused parameters in DDP
+        if enable_temporal_embedding:
+            self.temporal_offset_embedding = TemporalOffsetEmbedding(
+                n_output_channels=n_output_channels,
+                sin_dim=32,
+                hidden_dim=64
+            )
+        else:
+            self.temporal_offset_embedding = None
 
         self.init_weights()
 
@@ -239,7 +244,15 @@ class PSIProjectionSwiGLU(nn.Module):
             
         Returns:
             Temporal embedding of shape (1, n_output_channels, H, W)
+            
+        Raises:
+            RuntimeError: If temporal embedding is not enabled
         """
+        if self.temporal_offset_embedding is None:
+            raise RuntimeError(
+                "Temporal offset embedding is not enabled. "
+                "Initialize PSIProjectionSwiGLU with enable_temporal_embedding=True."
+            )
         return self.temporal_offset_embedding(
             offset=offset,
             spatial_size=spatial_size,
@@ -299,6 +312,11 @@ class PSIProjectionSwiGLU(nn.Module):
         if temporal_offsets is not None:
             # Compute temporal embeddings for all requested offsets
             # This goes through forward pass so DDP handles gradients correctly
+            if self.temporal_offset_embedding is None:
+                raise RuntimeError(
+                    "Temporal offset embedding is not enabled but temporal_offsets was requested. "
+                    "Initialize PSIProjectionSwiGLU with enable_temporal_embedding=True."
+                )
             assert temporal_spatial_size is not None, "temporal_spatial_size required when temporal_offsets provided"
             temporal_embs = {}
             for offset in temporal_offsets:
