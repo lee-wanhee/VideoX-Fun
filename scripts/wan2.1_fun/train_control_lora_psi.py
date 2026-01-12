@@ -939,12 +939,15 @@ def main():
         # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
         if fsdp_stage != 0:
             def save_model_hook(models, weights, output_dir):
-                accelerate_state_dict = accelerator.get_state_dict(models[-1], unwrap=True)
+                # When PSI control is enabled, models[0] is network and models[-1] is psi_projection
+                # Otherwise, models[-1] is the network
+                network_model_idx = 0 if args.enable_psi_control else -1
+                accelerate_state_dict = accelerator.get_state_dict(models[network_model_idx], unwrap=True)
                 if accelerator.is_main_process:
                     from safetensors.torch import save_file
                     safetensor_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model.safetensors")
                     if args.use_peft_lora:
-                        network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(models[-1]), accelerate_state_dict)
+                        network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(models[network_model_idx]), accelerate_state_dict)
                         network_state_dict_kohya = convert_peft_lora_to_kohya_lora(network_state_dict)
                         safetensor_kohya_format_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model_compatible_with_comfyui.safetensors")
                         save_model(safetensor_kohya_format_save_path, network_state_dict_kohya)
@@ -985,12 +988,15 @@ def main():
         elif zero_stage == 3:
             # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
             def save_model_hook(models, weights, output_dir):
-                accelerate_state_dict = accelerator.get_state_dict(models[-1], unwrap=True)
+                # When PSI control is enabled, models[0] is network and models[-1] is psi_projection
+                # Otherwise, models[-1] is the network
+                network_model_idx = 0 if args.enable_psi_control else -1
+                accelerate_state_dict = accelerator.get_state_dict(models[network_model_idx], unwrap=True)
                 if accelerator.is_main_process:
                     from safetensors.torch import save_file
                     safetensor_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model.safetensors")
                     if args.use_peft_lora:
-                        network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(models[-1]), accelerate_state_dict)
+                        network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(models[network_model_idx]), accelerate_state_dict)
                         network_state_dict_kohya = convert_peft_lora_to_kohya_lora(network_state_dict)
                         safetensor_kohya_format_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model_compatible_with_comfyui.safetensors")
                         save_model(safetensor_kohya_format_save_path, network_state_dict_kohya)
@@ -1029,16 +1035,19 @@ def main():
             # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
             def save_model_hook(models, weights, output_dir):
                 if accelerator.is_main_process:
+                    # When PSI control is enabled, models[0] is network and models[-1] is psi_projection
+                    # Otherwise, models[-1] is the network
+                    network_model_idx = 0 if args.enable_psi_control else -1
                     safetensor_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model.safetensors")
                     if args.use_peft_lora:
-                        network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(models[-1]))
+                        network_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(models[network_model_idx]))
                         save_model(safetensor_save_path, network_state_dict)
 
                         network_state_dict_kohya = convert_peft_lora_to_kohya_lora(network_state_dict)
                         safetensor_kohya_format_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model_compatible_with_comfyui.safetensors")
                         save_model(safetensor_kohya_format_save_path, network_state_dict_kohya)
                     else:
-                        save_model(safetensor_save_path, accelerator.unwrap_model(models[-1]))
+                        save_model(safetensor_save_path, accelerator.unwrap_model(models[network_model_idx]))
 
                     # Save PSI projection model (only if enabled and trained)
                     if args.enable_psi_control and not args.psi_vae_only:
@@ -2243,7 +2252,7 @@ def main():
                 accelerator.log({"train_loss": train_loss}, step=global_step)
                 train_loss = 0.0
 
-                if global_step % args.checkpointing_steps == 0:
+                if global_step == 1 or global_step % args.checkpointing_steps == 0:  # Always save at first step for debugging
                     if args.use_deepspeed or args.use_fsdp or accelerator.is_main_process:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
