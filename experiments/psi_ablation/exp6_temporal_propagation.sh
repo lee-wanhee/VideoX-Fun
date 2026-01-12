@@ -85,7 +85,7 @@ WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 
 # Batch size calculation: 128 = 1 * 4 grad_accum * 32 GPUs
 TRAIN_BATCH_SIZE=1
-GRADIENT_ACCUMULATION_STEPS=4
+GRADIENT_ACCUMULATION_STEPS=8
 
 echo "=============================================="
 echo "Experiment 6: Temporal-Aware PSI Propagation"
